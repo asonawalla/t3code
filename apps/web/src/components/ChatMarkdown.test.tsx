@@ -5,11 +5,13 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
+import { renderMermaidImage } from "../lib/mermaid";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
 import { setMarkdownTaskChecked } from "./files/filePreviewMode";
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
+vi.mock("../lib/mermaid", () => ({ renderMermaidImage: vi.fn() }));
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../hooks/useSettings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../hooks/useSettings")>();
@@ -173,6 +175,118 @@ describe("ChatMarkdown favicon privacy", () => {
       await act(async () => {
         renderer?.unmount();
       });
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("ChatMarkdown Mermaid diagrams", () => {
+  it("renders a closed streaming fence as an image without rerendering for later prose", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const image = "data:image/svg+xml,%3Csvg%3Ediagram%3C%2Fsvg%3E";
+    vi.mocked(renderMermaidImage).mockReset().mockResolvedValue(image);
+    let renderer: ReactTestRenderer | undefined;
+    const incomplete = "```mermaid\nflowchart TD\n  A --> B";
+    const complete = `${incomplete}\n\`\`\``;
+    try {
+      await act(async () => {
+        renderer = create(<ChatMarkdown cwd={undefined} text={incomplete} isStreaming />);
+      });
+      expect(renderMermaidImage).not.toHaveBeenCalled();
+      expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+
+      await act(async () => {
+        renderer!.update(<ChatMarkdown cwd={undefined} text={complete} isStreaming />);
+      });
+      expect(renderMermaidImage).toHaveBeenCalledExactlyOnceWith(
+        "flowchart TD\n  A --> B\n",
+        "dark",
+      );
+      await act(async () => {
+        renderer!.root.findByType("img").props.onLoad();
+      });
+      expect(renderer!.root.findByType("img").props.src).toBe(image);
+      expect(renderer!.root.findByType("img").props.className).not.toContain("invisible");
+
+      await act(async () => {
+        renderer!.update(
+          <ChatMarkdown cwd={undefined} text={`${complete}\n\nMore explanation`} isStreaming />,
+        );
+      });
+      await act(async () => {
+        renderer!.update(
+          <ChatMarkdown cwd={undefined} text={`${complete}\n\nMore explanation.`} />,
+        );
+      });
+      expect(renderMermaidImage).toHaveBeenCalledTimes(1);
+      expect(renderer!.root.findByType("img").props.src).toBe(image);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("discards an old render that finishes after the diagram source changes", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let resolveOld!: (value: string) => void;
+    let resolveNew!: (value: string) => void;
+    const oldImage = new Promise<string>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newImage = new Promise<string>((resolve) => {
+      resolveNew = resolve;
+    });
+    vi.mocked(renderMermaidImage)
+      .mockReset()
+      .mockReturnValueOnce(oldImage)
+      .mockReturnValueOnce(newImage);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd={undefined} text={"```mermaid\nflowchart TD\n  A --> B\n```"} />,
+        );
+      });
+      await act(async () => {
+        renderer!.update(
+          <ChatMarkdown cwd={undefined} text={"```mermaid\nflowchart TD\n  C --> D\n```"} />,
+        );
+      });
+      await act(async () => {
+        resolveNew("data:image/svg+xml,new-diagram");
+      });
+      expect(renderer!.root.findByType("img").props.src).toBe("data:image/svg+xml,new-diagram");
+      await act(async () => {
+        resolveOld("data:image/svg+xml,old-diagram");
+      });
+      expect(renderer!.root.findByType("img").props.src).toBe("data:image/svg+xml,new-diagram");
+      expect(renderMermaidImage).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps failed diagrams readable and copies their original source", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const writeText = vi.fn(async (_text: string) => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.mocked(renderMermaidImage).mockReset().mockRejectedValue(new Error("Invalid diagram"));
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd={undefined} text={"```mermaid\nnot a valid diagram\n```"} />,
+        );
+      });
+      expect(renderer!.root.findAllByType("img")).toHaveLength(0);
+      expect(renderer!.root.findByProps({ "data-language": "mermaid" })).toBeDefined();
+      await act(async () => {
+        codeButton(renderer!, "Copy code").onClick?.({} as never);
+      });
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("not a valid diagram\n");
+    } finally {
+      await act(async () => renderer?.unmount());
       vi.unstubAllGlobals();
     }
   });
