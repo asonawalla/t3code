@@ -62,7 +62,7 @@ describe("withRelayClientTracing", () => {
     }),
   );
 
-  it.effect("preserves nested error causes in exported relay spans", () => {
+  it.effect("does not export configured relay spans or alter application effects", () => {
     const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
     const httpClientLayer = FetchHttpClient.layer.pipe(
       Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchFn)),
@@ -81,24 +81,30 @@ describe("withRelayClientTracing", () => {
     ).pipe(Layer.provide(httpClientLayer));
     const rootCause = new Error("relay socket closed");
     const failure = new Error("relay request failed", { cause: rootCause });
+    const userSpans: Array<string> = [];
     const tracedApplication = Layer.effectDiscard(
-      Effect.fail(failure).pipe(
-        Effect.withSpan("relay.failed-operation"),
-        withRelayClientTracing,
-        Effect.exit,
-      ),
+      Effect.gen(function* () {
+        const result = yield* Effect.succeed("connected").pipe(
+          Effect.withSpan("relay.operation"),
+          withRelayClientTracing,
+        );
+        const error = yield* Effect.fail(failure).pipe(
+          Effect.withSpan("relay.failed-operation"),
+          withRelayClientTracing,
+          Effect.flip,
+        );
+
+        expect(result).toBe("connected");
+        expect(error).toBe(failure);
+      }).pipe(Effect.withTracer(collectingTracer(userSpans))),
     ).pipe(Layer.provide(tracingLayer));
 
     return Layer.build(tracedApplication).pipe(
       Effect.scoped,
       Effect.andThen(
         Effect.sync(() => {
-          expect(fetchFn).toHaveBeenCalledOnce();
-          const payload = new TextDecoder().decode(fetchFn.mock.calls[0]?.[1]?.body as Uint8Array);
-          expect(payload).toContain("relay request failed");
-          expect(payload).toContain("relay socket closed");
-          expect(payload).toContain('"key":"service.name","value":{"stringValue":"relay-test"}');
-          expect(payload).toContain('"key":"service.namespace","value":{"stringValue":"t3code"}');
+          expect(fetchFn).not.toHaveBeenCalled();
+          expect(userSpans).toEqual(["relay.operation", "relay.failed-operation"]);
         }),
       ),
     );
