@@ -2577,12 +2577,12 @@ export const make = Effect.gen(function* () {
 
       const worktree = yield* gitCore.createWorktree(
         {
+          ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
           cwd: input.cwd,
           refName: localPullRequestBranch,
           path: null,
         },
         {
-          ...(input.threadId !== undefined ? { ownerThreadId: input.threadId } : {}),
           // Best effort: a settings read failure falls back to the checkout's t3.json.
           submodules: yield* projectSettingsFor(input).pipe(
             Effect.map((settings) => settings.worktreeSubmodules),
