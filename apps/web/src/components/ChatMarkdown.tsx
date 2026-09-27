@@ -136,6 +136,7 @@ import { openInEditorMenuLabel } from "../editorLabels";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
+import { renderMermaidImage } from "../lib/mermaid";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { GitHubIcon } from "./Icons";
 import { createIncrementalHighlightedDocument } from "../lib/incrementalHighlighting";
@@ -1109,6 +1110,64 @@ function MarkdownCodeBlock({
         </span>
       </div>
       {children}
+    </div>
+  );
+}
+
+function MarkdownMermaidBlock({
+  code,
+  theme,
+  ready,
+  title,
+  children,
+}: {
+  code: string;
+  theme: "light" | "dark";
+  ready: boolean;
+  title: string | null;
+  children: ReactNode;
+}) {
+  const { expandMedia } = use(ChatMarkdownRendererContext);
+  const [image, setImage] = useState<{ code: string; theme: string; src: string } | null>(null);
+
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    void renderMermaidImage(code, theme).then(
+      (src) => {
+        if (!cancelled) setImage({ code, theme, src });
+      },
+      () => {
+        // Incomplete or invalid diagrams remain readable and copyable as source.
+        if (!cancelled) setImage(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [code, ready, theme]);
+
+  if (!ready || image?.code !== code || image.theme !== theme) return children;
+  const name = title ?? "Mermaid diagram";
+  const fence = "`".repeat(
+    Math.max(3, ...[...code.matchAll(/`+/g)].map(([run]) => run.length + 1)),
+  );
+  const copyMarkdown = `${fence}mermaid\n${code.trimEnd()}\n${fence}\n\n`;
+  return (
+    <div className="my-[0.65rem]" data-markdown-copy={copyMarkdown}>
+      <ChatMarkdownImage
+        src={image.src}
+        alt={name}
+        copyMarkdown={copyMarkdown}
+        standalone
+        style={{ maxWidth: "100%", maxHeight: "none" }}
+        actionsSource={{ kind: "image", name: `${name}.svg`, src: image.src }}
+        onImageExpand={expandMedia}
+      />
+      <MarkdownDetails>
+        <summary>Diagram source</summary>
+        {children}
+      </MarkdownDetails>
     </div>
   );
 }
@@ -3310,7 +3369,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
     const language = extractFenceLanguage(codeBlock.className);
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
-    return (
+    const source = (
       <MarkdownCodeBlock
         code={codeBlock.code}
         language={language}
@@ -3345,6 +3404,18 @@ const CHAT_MARKDOWN_COMPONENTS = {
           </Suspense>
         </RenderErrorBoundary>
       </MarkdownCodeBlock>
+    );
+    return language.toLowerCase() === "mermaid" ? (
+      <MarkdownMermaidBlock
+        code={codeBlock.code}
+        theme={resolvedTheme}
+        ready={!isStreaming || isClosedCodeFence(node, text)}
+        title={fenceTitle}
+      >
+        {source}
+      </MarkdownMermaidBlock>
+    ) : (
+      source
     );
   },
 } satisfies Components;
