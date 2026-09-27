@@ -9,7 +9,6 @@ import * as Schema from "effect/Schema";
 
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerConfig from "../config.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 
 /**
  * Codex writes `tokens` only for ChatGPT logins and omits the key for API-key,
@@ -256,7 +255,7 @@ const upsertAnonymousId = Effect.gen(function* () {
 });
 
 /**
- * getTelemetryIdentifier - Users are "identified" by finding the first match of the following, then hashing the value.
+ * getTelemetryIdentifierForHome - Users are "identified" by finding the first match of the following, then hashing the value.
  * 1. ~/.codex/auth.json tokens.account_id
  * 2. ~/.claude.json userID
  * 3. ~/.t3/telemetry/anonymous-id
@@ -309,9 +308,4 @@ export const getTelemetryIdentifierForHome = Effect.fn("getTelemetryIdentifierFo
   },
   Effect.tapError(logTelemetryIdentityError),
   Effect.orElseSucceed(() => null),
-);
-
-export const getTelemetryIdentifier = Effect.flatMap(
-  HostProcess.HomeDirectory,
-  getTelemetryIdentifierForHome,
 );
