@@ -3444,6 +3444,41 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("create_pr retains the known PR when its first refresh fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/created-fallback"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/created-fallback"]);
+
+      const identity = { url: "https://github.com/octocat/project/pull/3", number: 3 };
+      const scenario: FakeGhScenario = {
+        prListByHeadSelector: { "feature/created-fallback": "[]" },
+        createdPrIdentity: identity,
+      };
+      const { manager, ghCalls } = yield* makeManager({ ghScenario: scenario });
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
+      ).toBeNull();
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+      expect(result.pr).toMatchObject({ status: "created", ...identity });
+
+      scenario.failAfterCalls = ghCalls.length;
+      scenario.failWith = new GitHubCli.GitHubCliRateLimitError({
+        command: "gh",
+        cwd: repoDir,
+        cause: new Error("rate limited"),
+      });
+      yield* manager.invalidateStatus(repoDir);
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
+      ).toMatchObject(identity);
+    }),
+  );
+
   it.effect("create_pr falls back to main when source control provider detection fails", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");

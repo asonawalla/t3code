@@ -171,34 +171,31 @@ function makeBackgroundPolicyLayer(shouldRunScopeWork: (scope: BackgroundScope) 
 }
 
 describe("VcsStatusBroadcaster", () => {
-  it.effect(
-    "publishes a created PR without remote discovery, including an aliased head branch",
-    () => {
-      const state = {
-        currentLocalStatus: baseLocalStatus,
-        currentRemoteStatus: baseRemoteStatus,
-        localStatusCalls: 0,
-        remoteStatusCalls: 0,
-        localInvalidationCalls: 0,
-        remoteInvalidationCalls: 0,
-      };
+  it.effect("publishes current status after creation, including an aliased head branch", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: { ...baseRemoteStatus, aheadCount: 3, pr: createdPullRequestStatus },
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
 
-      return Effect.gen(function* () {
-        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
-        assert.isTrue(
-          yield* broadcaster.publishCreatedPullRequest("/repo", createdPullRequestResult),
-        );
-        const status = yield* broadcaster.getStatus({ cwd: "/repo" });
-        assert.deepStrictEqual(status.pr, createdPullRequestStatus);
-        assert.equal(status.refName, createdPullRequestResult.branch.name);
-        assert.equal(status.aheadCount, 0);
-        assert.isTrue(status.hasUpstream);
-        assert.equal(state.remoteStatusCalls, 0);
-      }).pipe(Effect.provide(makeTestLayer(state)));
-    },
-  );
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      assert.isTrue(
+        yield* broadcaster.publishCreatedPullRequest("/repo", createdPullRequestResult),
+      );
+      const status = yield* broadcaster.getStatus({ cwd: "/repo" });
+      assert.deepStrictEqual(status.pr, createdPullRequestStatus);
+      assert.equal(status.refName, createdPullRequestResult.branch.name);
+      assert.equal(status.aheadCount, 3);
+      assert.isTrue(status.hasUpstream);
+      assert.equal(state.remoteStatusCalls, 1);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
 
-  it.effect("broadcasts creation only to the matching cwd and skips a changed local branch", () => {
+  it.effect("publishes post-push counts only to the matching cwd and branch", () => {
     const state = {
       currentLocalStatus: baseLocalStatus,
       currentRemoteStatus: { ...baseRemoteStatus, aheadCount: 2, behindCount: 1 },
@@ -214,21 +211,29 @@ describe("VcsStatusBroadcaster", () => {
       yield* broadcaster.getStatus({ cwd: "/other" });
       const subscribed = yield* Deferred.make<void>();
       const published = yield* Deferred.make<VcsStatusStreamEvent>();
-      yield* broadcaster.streamStatus({ cwd: "/repo" }).pipe(
-        Stream.runForEach((event) =>
-          event._tag === "snapshot"
-            ? Deferred.succeed(subscribed, undefined)
-            : event._tag === "remoteUpdated"
-              ? Deferred.succeed(published, event)
-              : Effect.void,
-        ),
-        Effect.forkScoped,
-      );
+      yield* broadcaster
+        .streamStatus(
+          { cwd: "/repo" },
+          {
+            automaticRemoteRefreshInterval: Effect.succeed(Duration.zero),
+          },
+        )
+        .pipe(
+          Stream.runForEach((event) =>
+            event._tag === "snapshot"
+              ? Deferred.succeed(subscribed, undefined)
+              : event._tag === "remoteUpdated"
+                ? Deferred.succeed(published, event)
+                : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
       yield* Deferred.await(subscribed);
+      state.currentRemoteStatus = { ...baseRemoteStatus, pr: createdPullRequestStatus };
       yield* broadcaster.publishCreatedPullRequest("/repo", createdPullRequestResult);
       assert.deepStrictEqual(yield* Deferred.await(published), {
         _tag: "remoteUpdated",
-        remote: { ...state.currentRemoteStatus, pr: createdPullRequestStatus },
+        remote: state.currentRemoteStatus,
       });
       assert.isNull((yield* broadcaster.getStatus({ cwd: "/other" })).pr);
       state.currentLocalStatus = { ...baseLocalStatus, refName: "another-branch" };
@@ -236,7 +241,7 @@ describe("VcsStatusBroadcaster", () => {
         yield* broadcaster.publishCreatedPullRequest("/other", createdPullRequestResult),
       );
       assert.isNull((yield* broadcaster.getStatus({ cwd: "/other" })).pr);
-      assert.equal(state.remoteStatusCalls, 2);
+      assert.equal(state.remoteStatusCalls, 3);
     }).pipe(Effect.provide(makeTestLayer(state)), Effect.scoped);
   });
 
@@ -271,7 +276,7 @@ describe("VcsStatusBroadcaster", () => {
         .publishCreatedPullRequest("/repo", createdPullRequestResult)
         .pipe(Effect.forkScoped);
       yield* Deferred.await(localReadStarted);
-      remote = { ...baseRemoteStatus, aheadCount: 3 };
+      remote = { ...baseRemoteStatus, aheadCount: 3, pr: createdPullRequestStatus };
       yield* broadcaster.refreshPullRequestStatus("/repo");
       yield* Deferred.succeed(releaseLocalRead, undefined);
       assert.isTrue(yield* Fiber.join(publish));
@@ -297,11 +302,15 @@ describe("VcsStatusBroadcaster", () => {
               remoteStatus: () =>
                 Effect.gen(function* () {
                   remoteReads += 1;
+                  const remote =
+                    remoteReads > (read === "getStatus" ? 1 : 2)
+                      ? { ...baseRemoteStatus, pr: createdPullRequestStatus }
+                      : baseRemoteStatus;
                   if (remoteReads === (read === "getStatus" ? 1 : 2)) {
                     yield* Deferred.succeed(readStarted, undefined);
                     yield* Deferred.await(releaseRead);
                   }
-                  return baseRemoteStatus;
+                  return remote;
                 }),
               invalidateLocalStatus: () => Effect.void,
               invalidateStatus: () => Effect.void,

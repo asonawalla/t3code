@@ -445,41 +445,18 @@ export const make = Effect.gen(function* () {
   const publishCreatedPullRequest: VcsStatusBroadcaster["Service"]["publishCreatedPullRequest"] =
     Effect.fn("VcsStatusBroadcaster.publishCreatedPullRequest")(function* (rawCwd, result) {
       const { pr } = result;
-      if (
-        pr.status !== "created" ||
-        pr.number === undefined ||
-        !pr.url ||
-        !pr.title ||
-        !pr.headBranch ||
-        !pr.baseBranch ||
-        !result.branch.name
-      )
+      if (pr.status !== "created" || pr.number === undefined || !pr.url || !result.branch.name)
         return false;
       const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
-      const cached = yield* getCachedStatus(cwd);
       const local = yield* refreshLocalStatusCore(cwd);
       if (!local.isRepo || local.refName !== result.branch.name) return false;
-      const latest = yield* getCachedStatus(cwd);
-      const remote = cached?.local?.value.refName === local.refName ? latest?.remote?.value : null;
+      // Read current Git counts and the PR cached by creation without fetching.
+      const remote = yield* workflow.remoteStatus({ cwd }, { refreshUpstream: false });
+      if (remote?.pr?.url !== pr.url) return false;
       // Creation is already confirmed. Do not queue behind a remote read that
       // began before it, or allow that older response to erase the new PR.
       remoteWriteGenerations.set(cwd, (remoteWriteGenerations.get(cwd) ?? 0) + 1);
-      yield* updateCachedRemoteStatus(
-        cwd,
-        {
-          ...(remote ?? { hasUpstream: true, aheadCount: 0, behindCount: 0 }),
-          hasUpstream: true,
-          pr: {
-            number: pr.number,
-            url: pr.url,
-            title: pr.title,
-            headRef: pr.headBranch,
-            baseRef: pr.baseBranch,
-            state: "open",
-          },
-        },
-        { publish: true },
-      );
+      yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
       return true;
     });
 

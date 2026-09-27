@@ -2133,6 +2133,13 @@ export const make = Effect.gen(function* () {
       }),
       { latest: created, headContext },
     );
+    rememberLastKnownPr(`${cacheCwd}\u0000${branch}`, {
+      pr: toStatusPr(created),
+      upstreamRef: details.upstreamRef,
+      headBranch: headContext.headBranch,
+      remoteName: headContext.remoteName,
+      headRemoteUrlKey: headContext.headRemoteUrlKey,
+    });
 
     return {
       status: "created" as const,
