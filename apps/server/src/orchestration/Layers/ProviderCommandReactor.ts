@@ -511,7 +511,10 @@ const make = Effect.gen(function* () {
     );
     yield* gitWorkflow.pruneWorktrees({ cwd }).pipe(
       Effect.andThen(
-        gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath }, { submodules }),
+        gitWorkflow.createWorktree(
+          { cwd, refName: branch, path: worktreePath },
+          { submodules, ownerThreadId: thread.id },
+        ),
       ),
       Effect.catchCauseIf(
         (cause) => !Cause.hasInterruptsOnly(cause),
@@ -1720,7 +1723,9 @@ const make = Effect.gen(function* () {
   const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
   ) {
-    const thread = yield* resolveThreadShell(event.payload.threadId);
+    const thread = yield* projectionSnapshotQuery
+      .getThreadShellById(event.payload.threadId, { includeArchived: true })
+      .pipe(Effect.map(Option.getOrUndefined));
     if (!thread) {
       return;
     }

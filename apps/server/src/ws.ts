@@ -1511,6 +1511,7 @@ const makeWsRpcLayer = (
                 },
                 {
                   submodules,
+                  ownerThreadId: threadId,
                   progress: {
                     // Git has registered the directory at this point, so a
                     // cancel during the submodule step can still remove it.
@@ -3668,7 +3669,12 @@ const makeWsRpcLayer = (
         [WS_METHODS.vcsCreateWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsCreateWorktree,
-            gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            gitWorkflow
+              .createWorktree(
+                input,
+                input.threadId !== undefined ? { ownerThreadId: input.threadId } : undefined,
+              )
+              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
