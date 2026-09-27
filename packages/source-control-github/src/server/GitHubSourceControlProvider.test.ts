@@ -455,7 +455,10 @@ describe("GitHubSourceControlProvider writes", () => {
         rest: (input) =>
           Effect.sync(() => {
             requests.push(input);
-            return restResponse({ number: 1 }, 201);
+            return restResponse(
+              { number: 42, html_url: "https://github.com/acme/web/pull/42" },
+              201,
+            );
           }),
       },
     });
@@ -464,13 +467,16 @@ describe("GitHubSourceControlProvider writes", () => {
       const bodyFile = yield* fs.makeTempFileScoped({ suffix: ".md" });
       yield* fs.writeFileString(bodyFile, "Body");
       const gh = yield* GitHubSourceControlProvider.make;
-      yield* gh.createChangeRequest({
+      const created = yield* gh.createChangeRequest({
         cwd: "/repo",
         baseRefName: "main",
         headSelector: "me:feature",
         title: "Title",
         bodyFile,
       });
+      // The response names the new pull request, so no follow-up lookup is needed.
+      assert.deepStrictEqual(created, { url: "https://github.com/acme/web/pull/42", number: 42 });
+      assert.strictEqual(requests.length, 1);
       assert.strictEqual(requests[0]!.method, "POST");
       assert.strictEqual(requests[0]!.path, "repos/acme/web/pulls");
       // A user's own write, so the background's reserve is not held against it.
@@ -482,6 +488,32 @@ describe("GitHubSourceControlProvider writes", () => {
         body: "Body",
         maintainer_can_modify: true,
       });
+    }).pipe(Effect.provide(Layer.merge(layer, NodeServices.layer)), Effect.scoped);
+  });
+
+  it.effect.each([
+    undefined,
+    { number: 1 },
+    { html_url: "https://github.com/acme/web/pull/42" },
+    { number: 0, html_url: "https://github.com/acme/web/pull/0" },
+  ])("leaves a created pull request to the head lookup when its response is %j", (response) => {
+    const { layer } = harness({
+      remotes: remotesOutput(["origin", "git@github.com:acme/web.git"]),
+      api: { rest: () => Effect.succeed(restResponse(response, 201)) },
+    });
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const bodyFile = yield* fs.makeTempFileScoped({ suffix: ".md" });
+      yield* fs.writeFileString(bodyFile, "Body");
+      const gh = yield* GitHubSourceControlProvider.make;
+      const created = yield* gh.createChangeRequest({
+        cwd: "/repo",
+        baseRefName: "main",
+        headSelector: "feature",
+        title: "Title",
+        bodyFile,
+      });
+      assert.isUndefined(created);
     }).pipe(Effect.provide(Layer.merge(layer, NodeServices.layer)), Effect.scoped);
   });
 

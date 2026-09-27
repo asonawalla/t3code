@@ -10,6 +10,7 @@ import * as RequestResolver from "effect/RequestResolver";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import {
+  PositiveInt,
   SourceControlProviderError,
   TrimmedNonEmptyString,
   type ChangeRequest,
@@ -358,6 +359,10 @@ function repositoryCloneUrls(
 }
 
 const decodeViewerLogin = decodeJsonResult(Schema.Struct({ login: TrimmedNonEmptyString }));
+
+const decodeCreatedPullRequest = decodeJsonResult(
+  Schema.Struct({ number: PositiveInt, html_url: TrimmedNonEmptyString }),
+);
 
 type PullRequestListState = "open" | "closed" | "merged" | "all";
 
@@ -1006,7 +1011,7 @@ export const make = Effect.gen(function* () {
               failure("The pull request description could not be read.", cause),
             ),
           );
-        yield* rest({
+        const response = yield* rest({
           host: locator.host,
           operation: "createPullRequest",
           method: "POST",
@@ -1023,6 +1028,11 @@ export const make = Effect.gen(function* () {
             maintainer_can_modify: true,
           },
         });
+        // An unreadable response still means GitHub created the pull request. Returning
+        // nothing leaves it to the caller's head lookup.
+        const created = decodeCreatedPullRequest(response.body);
+        if (Result.isFailure(created)) return;
+        return { url: created.success.html_url, number: created.success.number };
       }).pipe(
         Effect.mapError(
           providerError("createChangeRequest", input.cwd, { reference: input.headSelector }),

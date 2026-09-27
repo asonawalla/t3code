@@ -83,6 +83,8 @@ interface FakeGhScenario {
   prListByHeadSelector?: Record<string, string>;
   prListSequenceByHeadSelector?: Record<string, string[]>;
   createdPrUrl?: string;
+  /** What creation reports. Unset leaves the created PR to the head lookup. */
+  createdPrIdentity?: { url: string; number: number };
   defaultBranch?: string;
   pullRequest?: {
     number: number;
@@ -640,7 +642,7 @@ function createGitHubProviderWithFakeGh(scenario: FakeGhScenario = {}): {
             "--body-file",
             input.bodyFile,
           ],
-        }).pipe(Effect.asVoid),
+        }).pipe(Effect.as(scenario.createdPrIdentity)),
       getDefaultBranch: (input) =>
         execute({
           operation: "getDefaultBranch",
@@ -4316,6 +4318,10 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(result.push.setUpstream).toBe(true);
       expect(result.pr.status).toBe("created");
       expect(result.pr.number).toBe(303);
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr?.number,
+      ).toBe(303);
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
       expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toBe(statusBefore);
       expect(
         (yield* runGit(remoteDir, ["rev-parse", "feature/create-pr-only"])).stdout.trim(),
@@ -4325,6 +4331,90 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           call.includes("pr create --base main --head feature/create-pr-only"),
         ),
       ).toBe(true);
+    }),
+  );
+
+  it.effect("create_pr retains the creation identity without another PR lookup", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/created-identity"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, [
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+      ]);
+
+      const identity = { url: "https://github.com/octocat/project/pull/3", number: 3 };
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListByHeadSelector: { "feature/created-identity": "[]" },
+          createdPrIdentity: identity,
+        },
+      });
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
+      ).toBeNull();
+      // Discovery remembers the branch before create_pr pushes it. That stale
+      // upstream must not steer the next lookup away from the created PR.
+      expect(
+        yield* manager.branchPullRequest({ cwd: repoDir, branch: "feature/created-identity" }),
+      ).toBeNull();
+      const prListsBeforeCreate = ghCalls.filter((call) => call.startsWith("pr list ")).length;
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+
+      expect(result.pr).toEqual({
+        status: "created",
+        ...identity,
+        title: "Add stacked git actions",
+        baseBranch: "main",
+        headBranch: "feature/created-identity",
+      });
+      expect(result.branch.name).toBe("feature/created-identity");
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
+      ).toMatchObject(identity);
+      expect(
+        yield* manager.branchPullRequest({ cwd: repoDir, branch: "feature/created-identity" }),
+      ).toMatchObject(identity);
+      // Only the existing-PR check before creation asks the host.
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(
+        prListsBeforeCreate + 1,
+      );
+    }),
+  );
+
+  it.effect("create_pr retains the known PR when its first refresh fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/created-fallback"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/created-fallback"]);
+
+      const identity = { url: "https://github.com/octocat/project/pull/3", number: 3 };
+      const scenario: FakeGhScenario = {
+        prListByHeadSelector: { "feature/created-fallback": "[]" },
+        createdPrIdentity: identity,
+      };
+      const { manager, ghCalls } = yield* makeManager({ ghScenario: scenario });
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
+      ).toBeNull();
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+      expect(result.pr).toMatchObject({ status: "created", ...identity });
+
+      scenario.failAfterCalls = ghCalls.length;
+      scenario.failWith = "GitHub API rate limit exceeded.";
+      yield* manager.invalidateStatus(repoDir);
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
+      ).toMatchObject(identity);
     }),
   );
 
@@ -4827,7 +4917,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("rejects same-repo PR metadata when matching a cross-repo head context", () =>
+  it.effect("matches a branch's head even when the PR targets the fork instead of origin", () =>
     Effect.sync(() => {
       const headContext = {
         headBranch: "statemachine",
@@ -4852,7 +4942,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
           headContext,
         ),
-      ).toBe(false);
+      ).toBe(true);
 
       expect(
         GitManager.matchesBranchHeadContext(
@@ -4871,6 +4961,68 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           headContext,
         ),
       ).toBe(true);
+    }),
+  );
+
+  it.effect("discovers a PR within the tracked fork for status and create_pr", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const originDir = yield* createBareRemote();
+      const forkDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", originDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/fork-pr"]);
+      yield* runGit(repoDir, ["remote", "add", "fork", forkDir]);
+      yield* runGit(repoDir, ["push", "-u", "fork", "feature/fork-pr"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/upstream/project.git",
+        originDir,
+      );
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "fork",
+        "https://github.com/octocat/project.git",
+        forkDir,
+      );
+      yield* runGit(repoDir, ["config", "remote.fork.gh-resolved", "base"]);
+      const pr = {
+        number: 3,
+        title: "Fork PR",
+        url: "https://github.com/octocat/project/pull/3",
+        baseRefName: "main",
+        headRefName: "feature/fork-pr",
+        state: "OPEN",
+        isCrossRepository: false,
+        headRepository: { nameWithOwner: "octocat/project" },
+        headRepositoryOwner: { login: "octocat" },
+      };
+      const unrelated = {
+        ...pr,
+        number: 2,
+        headRepository: { nameWithOwner: "someone-else/project" },
+        headRepositoryOwner: { login: "someone-else" },
+      };
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          prListByHeadSelector: { "feature/fork-pr": encodeCliJson([unrelated, pr]) },
+        },
+      });
+
+      expect(
+        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr?.number,
+      ).toBe(3);
+      expect(
+        yield* manager.branchPullRequest({ cwd: repoDir, branch: "feature/fork-pr" }),
+      ).toMatchObject({
+        number: 3,
+        repositoryKey: "github.com/octocat/project",
+      });
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+      expect(result.pr).toMatchObject({ status: "opened_existing", number: 3, url: pr.url });
+      expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(false);
     }),
   );
 

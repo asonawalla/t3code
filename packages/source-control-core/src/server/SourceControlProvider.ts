@@ -163,6 +163,10 @@ export class SourceControlProvider extends Context.Service<
       readonly context?: SourceControlProviderContext;
       readonly reference: string;
     }) => Effect.Effect<ChangeRequest, SourceControlProviderError>;
+    /**
+     * Returns the created change request when the host reports it. Callers find
+     * one created without an identity by its head instead.
+     */
     readonly createChangeRequest: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
@@ -172,7 +176,10 @@ export class SourceControlProvider extends Context.Service<
       readonly headSelector: string;
       readonly title: string;
       readonly bodyFile: string;
-    }) => Effect.Effect<void, SourceControlProviderError>;
+    }) => Effect.Effect<
+      { readonly url: string; readonly number: number } | void,
+      SourceControlProviderError
+    >;
     readonly getRepositoryCloneUrls: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
