@@ -2289,19 +2289,20 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "owned");
         const ownerThreadId = ThreadId.make("thread-owner");
         const input = {
+          threadId: ownerThreadId,
           cwd,
           path: worktreePath,
           refName: initialBranch,
           newRefName: "feature/owned",
         };
 
-        yield* driver.createWorktree(input, { ownerThreadId });
+        yield* driver.createWorktree(input);
         assert.equal(yield* driver.getWorktreeOwner(worktreePath), ownerThreadId);
         assert.equal(yield* driver.getWorktreeOwner(cwd), null);
         assert.equal(yield* git(worktreePath, ["status", "--porcelain"]), "");
 
         const duplicate = yield* driver
-          .createWorktree(input, { ownerThreadId: ThreadId.make("another-thread") })
+          .createWorktree({ ...input, threadId: ThreadId.make("another-thread") })
           .pipe(Effect.result);
         assert.isTrue(Result.isFailure(duplicate));
         yield* driver.renameBranch({

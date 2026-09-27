@@ -3123,7 +3123,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       yield* progress.onWorktreeClaimed(worktreePath);
     }
 
-    const ownerThreadId = options?.ownerThreadId;
+    const ownerThreadId = input.threadId;
     if (ownerThreadId !== undefined) {
       // Git's per-worktree admin directory survives branch renames without
       // adding files to the checkout or claiming a reused worktree.
