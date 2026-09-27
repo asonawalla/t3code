@@ -420,9 +420,8 @@ export function matchesBranchHeadContext(
   }
 
   if (headContext.isCrossRepository) {
-    if (pr.isCrossRepository === false) {
-      return false;
-    }
+    // The hosting CLI can target a different repository than origin. A PR
+    // within the fork still belongs to this branch when its head matches.
     if (
       (expectedHead.repositoryNameWithOwner || expectedHead.ownerLogin) &&
       !pullRequestHead.repositoryNameWithOwner &&
@@ -2089,7 +2088,7 @@ export const make = Effect.gen(function* () {
       phase: "pr",
       label: `Creating ${terms.singular}...`,
     });
-    yield* provider
+    const createdIdentity = yield* provider
       .createChangeRequest({
         cwd,
         baseRefName: baseBranch,
@@ -2099,7 +2098,18 @@ export const make = Effect.gen(function* () {
       })
       .pipe(Effect.ensuring(fileSystem.remove(bodyFile).pipe(Effect.ignore)));
 
-    const created = yield* findOpenPr(cwd, headContext);
+    const created = createdIdentity
+      ? {
+          ...createdIdentity,
+          title: generated.title,
+          baseRefName: baseBranch,
+          headRefName: headContext.headBranch,
+          state: "open" as const,
+          updatedAt: Option.none(),
+          headRepositoryNameWithOwner: headContext.headRepositoryNameWithOwner,
+          headRepositoryOwnerLogin: headContext.headRepositoryOwnerLogin,
+        }
+      : yield* findOpenPr(cwd, headContext);
     if (!created) {
       return {
         status: "created" as const,
@@ -2108,6 +2118,28 @@ export const make = Effect.gen(function* () {
         title: generated.title,
       };
     }
+
+    const cacheCwd = yield* normalizeStatusCacheKey(cwd);
+    const defaultBranch = yield* gitCore.resolveDefaultBranchName(cacheCwd, "origin");
+    // The create response is authoritative even before branch searches see
+    // the PR. A new epoch also strands lookups started before creation.
+    yield* bumpPrLookupEpoch(cacheCwd);
+    yield* Cache.set(
+      prLookupCache,
+      prLookupCacheKey(cacheCwd, {
+        branch,
+        upstreamRef: details.upstreamRef,
+        defaultBranch,
+      }),
+      { latest: created, headContext },
+    );
+    rememberLastKnownPr(`${cacheCwd}\u0000${branch}`, {
+      pr: toStatusPr(created),
+      upstreamRef: details.upstreamRef,
+      headBranch: headContext.headBranch,
+      remoteName: headContext.remoteName,
+      headRemoteUrlKey: headContext.headRemoteUrlKey,
+    });
 
     return {
       status: "created" as const,
@@ -2818,7 +2850,7 @@ export const make = Effect.gen(function* () {
 
         const result = {
           action: input.action,
-          branch: branchStep,
+          branch: { ...branchStep, ...(currentBranch === null ? {} : { name: currentBranch }) },
           commit,
           push,
           pr,
@@ -2832,7 +2864,20 @@ export const make = Effect.gen(function* () {
       });
 
       return yield* runAction().pipe(
-        Effect.ensuring(invalidateStatus(input.cwd)),
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit) &&
+          exit.value.pr.status === "created" &&
+          exit.value.pr.url &&
+          exit.value.pr.number !== undefined
+            ? Effect.all(
+                [
+                  invalidateLocalStatusResultCache(input.cwd),
+                  invalidateRemoteStatusResultCache(input.cwd),
+                ],
+                { discard: true },
+              )
+            : invalidateStatus(input.cwd),
+        ),
         Effect.tapError((error) =>
           Effect.flatMap(Ref.get(currentPhase), (phase) =>
             progress.emit({

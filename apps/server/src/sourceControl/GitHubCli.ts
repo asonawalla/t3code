@@ -21,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
+import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubGraphQlBudget from "./githubGraphQlBudget.ts";
@@ -343,7 +344,7 @@ export class GitHubCli extends Context.Service<
       readonly headSelector: string;
       readonly title: string;
       readonly bodyFile: string;
-    }) => Effect.Effect<void, GitHubCliError>;
+    }) => Effect.Effect<{ readonly url: string; readonly number: number } | void, GitHubCliError>;
 
     readonly getDefaultBranch: (input: {
       readonly cwd: string;
@@ -1026,7 +1027,16 @@ export const make = Effect.gen(function* () {
           "--body-file",
           input.bodyFile,
         ],
-      }).pipe(Effect.asVoid),
+      }).pipe(
+        Effect.map((result) => {
+          const url = result.stdout.trim();
+          const parsed = parseChangeRequestUrl(url);
+          if (parsed === null || !/^\/[^/]+\/[^/]+\/pull\/\d+\/?$/u.test(new URL(url).pathname)) {
+            return;
+          }
+          return { url, number: parsed.number };
+        }),
+      ),
     getDefaultBranch: (input) =>
       execute({
         cwd: input.cwd,

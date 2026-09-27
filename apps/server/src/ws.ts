@@ -3640,7 +3640,18 @@ const makeWsRpcLayer = (
                             ),
                           )
                       ).pipe(
-                        Effect.andThen(refreshGitStatus(input.cwd)),
+                        Effect.andThen(
+                          vcsStatusBroadcaster.publishCreatedPullRequest(input.cwd, result).pipe(
+                            Effect.catchCause((cause) =>
+                              Effect.logWarning("Failed to publish created PR status", cause).pipe(
+                                Effect.as(false),
+                              ),
+                            ),
+                            Effect.flatMap((published) =>
+                              published ? Effect.void : refreshGitStatus(input.cwd),
+                            ),
+                          ),
+                        ),
                         Effect.andThen(Queue.end(queue).pipe(Effect.asVoid)),
                       ),
                   }),

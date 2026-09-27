@@ -362,6 +362,7 @@ describe("CheckpointReactor", () => {
           }),
         ),
       refreshStatus: () => Effect.die("refreshStatus should not be called in this test"),
+      publishCreatedPullRequest: () => Effect.succeed(false),
       refreshPullRequestStatus: (cwd: string) =>
         Effect.sync(() => {
           options?.pullRequestRefreshCalls?.push(cwd);

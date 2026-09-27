@@ -189,23 +189,45 @@ it.effect("lists change request history through the batched head lookup", () =>
   }),
 );
 
-it.effect("creates GitHub PRs through provider-neutral input names", () =>
+it.effect("treats empty non-open change request listings as no results", () =>
+  Effect.gen(function* () {
+    const provider = yield* makeProvider({
+      listPullRequestsByHead: () => Effect.succeed([]),
+    });
+
+    const changeRequests = yield* provider.listChangeRequests({
+      cwd: "/repo",
+      headSelector: "feature/empty",
+      state: "all",
+      limit: 10,
+    });
+
+    assert.deepStrictEqual(changeRequests, []);
+  }),
+);
+
+it.effect("creates GitHub PRs through provider-neutral inputs and preserves their identity", () =>
   Effect.gen(function* () {
     let createInput: Parameters<GitHubCli.GitHubCli["Service"]["createPullRequest"]>[0] | null =
       null;
     const provider = yield* makeProvider({
       createPullRequest: (input) => {
         createInput = input;
-        return Effect.void;
+        return Effect.succeed({ url: "https://github.com/owner/project/pull/42", number: 42 });
       },
     });
 
-    yield* provider.createChangeRequest({
+    const result = yield* provider.createChangeRequest({
       cwd: "/repo",
       baseRefName: "main",
       headSelector: "owner:feature/provider",
       title: "Provider PR",
       bodyFile: "/tmp/body.md",
+    });
+
+    assert.deepStrictEqual(result, {
+      url: "https://github.com/owner/project/pull/42",
+      number: 42,
     });
 
     assert.deepStrictEqual(createInput, {
