@@ -28,6 +28,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -48,6 +49,11 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
+import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
+import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
+import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -214,6 +220,9 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const pendingApprovals = yield* ProjectionPendingApprovalRepository;
+  const threadActivities = yield* ProjectionThreadActivityRepository;
+  const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const providerAuthService = yield* ProviderAuthService;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
@@ -511,7 +520,10 @@ const make = Effect.gen(function* () {
     );
     yield* gitWorkflow.pruneWorktrees({ cwd }).pipe(
       Effect.andThen(
-        gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath }, { submodules }),
+        gitWorkflow.createWorktree(
+          { cwd, refName: branch, path: worktreePath, threadId: thread.id },
+          { submodules },
+        ),
       ),
       Effect.catchCauseIf(
         (cause) => !Cause.hasInterruptsOnly(cause),
@@ -1717,10 +1729,82 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const resolveStoppedSessionRequests = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const approvals = yield* pendingApprovals.listByThreadId({ threadId });
+    const requests = approvals
+      .filter((request) => request.status === "pending")
+      .map((request) => ({
+        requestId: String(request.requestId),
+        turnId: request.turnId,
+        createdAt: request.createdAt,
+        kind: "approval",
+      }));
+    const activities = yield* threadActivities.listUserInputLifecycleByThreadId({ threadId });
+    const nativeInputs = new Map<string, (typeof activities)[number]>();
+    const closedInputs = new Set<string>();
+    for (const activity of activities) {
+      if (!Predicate.isObject(activity.payload)) continue;
+      const { requestId, responseMode, detail } = activity.payload;
+      if (typeof requestId !== "string") continue;
+      if (
+        activity.kind === "user-input.resolved" ||
+        (activity.kind === "provider.user-input.respond.failed" &&
+          typeof detail === "string" &&
+          /(?:stale|unknown) pending (?:codex )?user[- ]input request/i.test(detail))
+      ) {
+        // Server resolutions may be read before sequenced provider requests.
+        closedInputs.add(requestId);
+        nativeInputs.delete(requestId);
+      } else if (
+        activity.kind === "user-input.requested" &&
+        responseMode !== "message" &&
+        !closedInputs.has(requestId)
+      ) {
+        nativeInputs.set(requestId, activity);
+      }
+    }
+    for (const [requestId, activity] of nativeInputs) {
+      requests.push({
+        requestId,
+        turnId: activity.turnId,
+        createdAt: activity.createdAt,
+        kind: "user-input",
+      });
+    }
+    const stoppedAt = DateTime.toEpochMillis(yield* DateTime.now);
+    for (const request of requests) {
+      // Pending-input summaries order by timestamp; a delayed request may be
+      // newer than the stop command and must still precede its resolution.
+      const createdAt = DateTime.formatIso(
+        DateTime.makeUnsafe(Math.max(stoppedAt, Date.parse(request.createdAt) + 1)),
+      );
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: yield* serverCommandId("session-stop-request-resolved"),
+        threadId,
+        activity: {
+          id: yield* serverEventId(),
+          kind: `${request.kind}.resolved`,
+          summary: request.kind === "approval" ? "Approval cancelled" : "User input dismissed",
+          tone: "info",
+          turnId: request.turnId,
+          createdAt,
+          payload: {
+            requestId: request.requestId,
+            ...(request.kind === "approval" ? { decision: "cancel" } : {}),
+          },
+        },
+        createdAt,
+      });
+    }
+  });
+
   const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
   ) {
-    const thread = yield* resolveThreadShell(event.payload.threadId);
+    const thread = yield* projectionSnapshotQuery
+      .getThreadShellById(event.payload.threadId, { includeArchived: true })
+      .pipe(Effect.map(Option.getOrUndefined));
     if (!thread) {
       return;
     }
@@ -1764,21 +1848,27 @@ const make = Effect.gen(function* () {
           );
         },
         onSuccess: () =>
-          setThreadSession({
-            threadId: thread.id,
-            session: {
+          Effect.gen(function* () {
+            // Archived threads do not ingest session.exited; clear liveness before
+            // the stopped-session event wakes worktree cleanup.
+            threadBackgroundLiveness.clearThreadLiveness(thread.id);
+            yield* resolveStoppedSessionRequests(thread.id);
+            return yield* setThreadSession({
               threadId: thread.id,
-              status: "stopped",
-              providerName: thread.session?.providerName ?? null,
-              ...(thread.session?.providerInstanceId !== undefined
-                ? { providerInstanceId: thread.session.providerInstanceId }
-                : {}),
-              runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
-              activeTurnId: null,
-              lastError: thread.session?.lastError ?? null,
-              updatedAt: now,
-            },
-            createdAt: now,
+              session: {
+                threadId: thread.id,
+                status: "stopped",
+                providerName: thread.session?.providerName ?? null,
+                ...(thread.session?.providerInstanceId !== undefined
+                  ? { providerInstanceId: thread.session.providerInstanceId }
+                  : {}),
+                runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+                activeTurnId: null,
+                lastError: thread.session?.lastError ?? null,
+                updatedAt: now,
+              },
+              createdAt: now,
+            });
           }),
       }),
       Effect.ensuring(clearStopping),
@@ -1962,4 +2052,7 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
+  Layer.provide(ProjectionPendingApprovalRepositoryLive),
+  Layer.provide(ProjectionThreadActivityRepositoryLive),
+);

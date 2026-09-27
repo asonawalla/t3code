@@ -10965,60 +10965,74 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("archives without dispatching session stop when the thread has no session", () =>
-    Effect.gen(function* () {
-      const threadId = ThreadId.make("thread-archive-no-session");
-      const effects: string[] = [];
-      const dispatchedCommands: Array<OrchestrationCommand> = [];
+  it.effect.each(["none", "approval", "user input"] as const)(
+    "archives a thread with no session and pending request: %s",
+    (pendingRequest) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread-archive-no-session");
+        const effects: string[] = [];
+        const dispatchedCommands: Array<OrchestrationCommand> = [];
 
-      yield* buildAppUnderTest({
-        layers: {
-          terminalManager: {
-            close: (input) =>
-              Effect.sync(() => {
-                effects.push(`terminal.close:${input.threadId}`);
-              }),
+        yield* buildAppUnderTest({
+          layers: {
+            terminalManager: {
+              close: (input) =>
+                Effect.sync(() => {
+                  effects.push(`terminal.close:${input.threadId}`);
+                }),
+            },
+            orchestrationEngine: {
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  dispatchedCommands.push(command);
+                  effects.push(`dispatch:${command.type}`);
+                  return { sequence: dispatchedCommands.length };
+                }),
+            },
+            projectionSnapshotQuery: {
+              getThreadShellById: () =>
+                Effect.succeedSome(
+                  makeDefaultOrchestrationThreadShell({
+                    id: threadId,
+                    session: null,
+                    hasPendingApprovals: pendingRequest === "approval",
+                    hasPendingUserInput: pendingRequest === "user input",
+                  }),
+                ),
+            },
           },
-          orchestrationEngine: {
-            dispatch: (command) =>
-              Effect.sync(() => {
-                dispatchedCommands.push(command);
-                effects.push(`dispatch:${command.type}`);
-                return { sequence: dispatchedCommands.length };
-              }),
-          },
-          projectionSnapshotQuery: {
-            getThreadShellById: () =>
-              Effect.succeedSome(
-                makeDefaultOrchestrationThreadShell({ id: threadId, session: null }),
-              ),
-          },
-        },
-      });
+        });
 
-      const wsUrl = yield* getWsServerUrl("/ws");
-      const dispatchResult = yield* Effect.scoped(
-        withWsRpcClient(wsUrl, (client) =>
-          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-            type: "thread.archive",
-            commandId: CommandId.make("cmd-thread-archive-no-session"),
-            threadId,
-          }),
-        ),
-      );
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const dispatchResult = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              type: "thread.archive",
+              commandId: CommandId.make("cmd-thread-archive-no-session"),
+              threadId,
+            }),
+          ),
+        );
 
-      assert.equal(dispatchResult.sequence, 1);
-      assert.deepEqual(effects, ["dispatch:thread.archive", `terminal.close:${threadId}`]);
-      assert.deepEqual(
-        dispatchedCommands.map((command) => command.type),
-        ["thread.archive"],
-      );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+        assert.equal(dispatchResult.sequence, 1);
+        const expectedCommands =
+          pendingRequest === "none"
+            ? ["thread.archive"]
+            : ["thread.archive", "thread.session.stop"];
+        assert.deepEqual(effects, [
+          ...expectedCommands.map((type) => `dispatch:${type}`),
+          `terminal.close:${threadId}`,
+        ]);
+        assert.deepEqual(
+          dispatchedCommands.map((command) => command.type),
+          expectedCommands,
+        );
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect(
-    "archives without dispatching session stop when the thread session is already stopped",
-    () =>
+  it.effect.each(["none", "approval", "user input"] as const)(
+    "archives a thread with a stopped session and pending request: %s",
+    (pendingRequest) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make("thread-archive-stopped-session");
         const effects: string[] = [];
@@ -11047,6 +11061,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   makeDefaultOrchestrationThreadShell({
                     id: threadId,
                     updatedAt: now,
+                    hasPendingApprovals: pendingRequest === "approval",
+                    hasPendingUserInput: pendingRequest === "user input",
                     session: {
                       threadId,
                       status: "stopped",
@@ -11074,10 +11090,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
 
         assert.equal(dispatchResult.sequence, 1);
-        assert.deepEqual(effects, ["dispatch:thread.archive", `terminal.close:${threadId}`]);
+        const expectedCommands =
+          pendingRequest === "none"
+            ? ["thread.archive"]
+            : ["thread.archive", "thread.session.stop"];
+        assert.deepEqual(effects, [
+          ...expectedCommands.map((type) => `dispatch:${type}`),
+          `terminal.close:${threadId}`,
+        ]);
         assert.deepEqual(
           dispatchedCommands.map((command) => command.type),
-          ["thread.archive"],
+          expectedCommands,
         );
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -11504,6 +11527,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           );
         }
         assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
+          threadId: ThreadId.make("thread-bootstrap"),
           cwd: "/tmp/project",
           refName: fetchedOriginCommit,
           newRefName: "t3code/bootstrap-refName",
@@ -11696,6 +11720,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }
       assert.equal(resolveRemoteTrackingCommit.mock.calls.length, 0);
       assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
+        threadId: ThreadId.make("thread-bootstrap-no-origin"),
         cwd: "/tmp/project",
         refName: "main",
         newRefName: "t3code/bootstrap-refName",

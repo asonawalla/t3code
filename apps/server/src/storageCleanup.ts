@@ -1,3 +1,4 @@
+import { ThreadId } from "@t3tools/contracts";
 import type {
   OrchestrationThreadShell,
   ProjectId,
@@ -174,7 +175,6 @@ export const make = Effect.gen(function* () {
     serverSettings: ServerSettings,
     now: number,
   ) {
-    if (!anyWorktreePolicy(serverSettings, worktreeCleanupEnabled)) return;
     if (!(yield* fs.exists(config.worktreesDir))) return;
     const hasDeleteRule = anyWorktreePolicy(serverSettings, (rules) => rules.worktreeOnDelete);
     const deletedThreads = hasDeleteRule
@@ -201,9 +201,10 @@ export const make = Effect.gen(function* () {
     ];
     for (const thread of candidates) {
       const settings = resolveWorktreeCleanup(serverSettings, thread.projectId);
-      if (!worktreeCleanupEnabled(settings)) continue;
       const worktreePath = path.resolve(thread.worktreePath!);
       const deleted = "deletedAt" in thread;
+      const archived = !deleted && thread.archivedAt !== null;
+      if (!archived && !worktreeCleanupEnabled(settings)) continue;
       const project = deleted
         ? { workspaceRoot: thread.workspaceRoot }
         : snapshot.projects.find((entry) => entry.id === thread.projectId);
@@ -219,6 +220,8 @@ export const make = Effect.gen(function* () {
         if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects])) return;
         // A linked worktree has a .git file. Never remove a main checkout.
         if ((yield* fs.stat(path.join(worktreePath, ".git"))).type !== "File") return;
+        const ownedArchive = archived && (yield* git.getWorktreeOwner(worktreePath)) === thread.id;
+        if (!ownedArchive && !worktreeCleanupEnabled(settings)) return;
         const status = yield* git.statusDetailsLocal(worktreePath);
         if (!status.isRepo || status.branch !== thread.branch || status.hasWorkingTreeChanges)
           return;
@@ -242,7 +245,7 @@ export const make = Effect.gen(function* () {
           !deleted &&
           settings.worktreeAfterDays !== null &&
           storageCleanupActivityAt(thread) < now - settings.worktreeAfterDays * DAY_MS;
-        let eligible = deleted || old;
+        let eligible = ownedArchive || deleted || old;
         if (!eligible && (settings.worktreeUnchanged || settings.worktreeOnMerge)) {
           const repositoryCwd = path.resolve(project.workspaceRoot);
           const remote = yield* git.resolvePrimaryRemoteName(repositoryCwd);
@@ -296,24 +299,25 @@ export const make = Effect.gen(function* () {
               .worktreeOnDelete
           )
             return;
-          // A failed session stop is logged by the deletion reactor. Its drain
-          // alone is not proof that a provider released this checkout.
-          if (
-            (yield* providers.listSessions()).some(
-              (session) =>
-                session.status !== "closed" &&
-                (session.threadId === thread.id ||
-                  (session.cwd !== undefined &&
-                    (path.resolve(session.cwd) === worktreePath ||
-                      inside(worktreePath, path.resolve(session.cwd))))),
-            )
-          )
-            return;
         } else if (
           latest.length !== 1 ||
           latest[0]!.id !== thread.id ||
+          (ownedArchive && latest[0]!.archivedAt === null) ||
           !storageCleanupThreadIdle(latest[0]!, now) ||
           storageCleanupActivityAt(latest[0]!) !== storageCleanupActivityAt(thread)
+        )
+          return;
+        // A stopped projection alone does not prove the provider released its cwd.
+        if (
+          (deleted || ownedArchive) &&
+          (yield* providers.listSessions()).some(
+            (session) =>
+              session.status !== "closed" &&
+              (session.threadId === thread.id ||
+                (session.cwd !== undefined &&
+                  (path.resolve(session.cwd) === worktreePath ||
+                    inside(worktreePath, path.resolve(session.cwd))))),
+          )
         )
           return;
         const finalStatus = yield* git.statusDetailsLocal(worktreePath);
@@ -426,6 +430,16 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  const enqueueForArchivedThread = Effect.fnUntraced(
+    function* (threadId: ThreadId) {
+      const thread = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+      if (Option.isSome(thread) && thread.value.archivedAt !== null) {
+        yield* worker.enqueue(undefined);
+      }
+    },
+    Effect.catch((error) => Effect.logDebug("archive cleanup check failed", { error })),
+  );
+
   const start = Effect.fn("StorageCleanup.start")(function* () {
     const unsubscribe = yield* terminals.subscribeMetadata((event) =>
       Effect.sync(() => {
@@ -439,7 +453,13 @@ export const make = Effect.gen(function* () {
           threadTerminals?.delete(event.terminalId);
           if (threadTerminals?.size === 0) liveTerminals.delete(event.threadId);
         }
-      }),
+      }).pipe(
+        Effect.andThen(() =>
+          event.type === "remove"
+            ? enqueueForArchivedThread(ThreadId.make(event.threadId))
+            : Effect.void,
+        ),
+      ),
     );
     yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
     const changes = yield* settingsService.subscribeChanges;
@@ -467,12 +487,17 @@ export const make = Effect.gen(function* () {
       }),
     );
     yield* forkParked(
-      Stream.runForEach(events, (event) =>
-        event.type === "thread.deleted" &&
-        anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)
-          ? worker.enqueue(undefined)
-          : Effect.void,
-      ),
+      Stream.runForEach(events, (event) => {
+        if (
+          event.type === "thread.archived" ||
+          (event.type === "thread.deleted" &&
+            anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete))
+        )
+          return worker.enqueue(undefined);
+        if (event.type === "thread.session-set" && event.payload.session.status === "stopped")
+          return enqueueForArchivedThread(event.payload.threadId);
+        return Effect.void;
+      }),
     );
   });
   return { start, drain: worker.drain } satisfies StorageCleanup["Service"];

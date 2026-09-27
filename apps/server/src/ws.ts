@@ -1498,6 +1498,7 @@ const makeWsRpcLayer = (
               });
               const worktree = yield* gitWorkflow.createWorktree(
                 {
+                  threadId,
                   cwd: prepareWorktree.projectCwd,
                   refName: worktreeBaseRef,
                   newRefName: prepareWorktree.branch,
@@ -1894,7 +1895,9 @@ const makeWsRpcLayer = (
                       Option.match({
                         onNone: () => false,
                         onSome: (thread) =>
-                          thread.session !== null && thread.session.status !== "stopped",
+                          (thread.session !== null && thread.session.status !== "stopped") ||
+                          thread.hasPendingApprovals ||
+                          thread.hasPendingUserInput,
                       }),
                     ),
                     Effect.catchCause((cause) =>

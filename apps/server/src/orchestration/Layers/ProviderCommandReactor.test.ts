@@ -121,6 +121,7 @@ describe("ProviderCommandReactor", () => {
     | OrchestrationEngineService
     | ProviderCommandReactor
     | ProjectionSnapshotQuery
+    | ThreadBackgroundLiveness.ThreadBackgroundLivenessService
     | SqlClient.SqlClient,
     unknown
   > | null = null;
@@ -465,6 +466,7 @@ describe("ProviderCommandReactor", () => {
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(reactorOrchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(ThreadBackgroundLiveness.layer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provide(Layer.mock(ProviderAuthService, { tryHandlePromptCommand })),
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
@@ -502,8 +504,12 @@ describe("ProviderCommandReactor", () => {
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+    const backgroundLiveness = await runtime.runPromise(
+      Effect.service(ThreadBackgroundLiveness.ThreadBackgroundLivenessService),
+    );
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
-    const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
+    const runEffect = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
+      runtime!.runPromise(effect);
 
     await Effect.runPromise(
       engine.dispatch({
@@ -601,6 +607,7 @@ describe("ProviderCommandReactor", () => {
     return {
       engine,
       snapshotQuery,
+      backgroundLiveness,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readPendingTurnStarts: () =>
         runtime!.runPromise(
@@ -2730,6 +2737,7 @@ describe("ProviderCommandReactor", () => {
         cwd: "/tmp/provider-project",
         refName: "feature/restore",
         path: worktreePath,
+        threadId: ThreadId.make("thread-1"),
       },
       { submodules: null },
     );
@@ -4342,46 +4350,173 @@ describe("ProviderCommandReactor", () => {
     expect(resolvedActivity).toBeUndefined();
   });
 
-  effectIt.effect("stops a provider session without reading unrelated message bodies", () =>
-    Effect.gen(function* () {
-      const harness = yield* Effect.promise(() => createHarness({ unreadableHistory: true }));
-      const now = "2026-01-01T00:00:00.000Z";
+  effectIt.effect.each([
+    "active",
+    "archived",
+    "archived-stop-failed",
+    "archived-already-stopped",
+    "archived-message-input",
+  ] as const)(
+    "clears native requests and background liveness only after a successful session stop (%s)",
+    (scenario) =>
+      Effect.gen(function* () {
+        const archived = scenario !== "active";
+        const stopFailed = scenario === "archived-stop-failed";
+        const alreadyStopped = scenario === "archived-already-stopped";
+        const messageInput = scenario === "archived-message-input";
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            unreadableHistory: true,
+            stopSessionEffect: () =>
+              stopFailed
+                ? Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: "codex",
+                      method: "session.stop",
+                      detail: "provider stop failed",
+                    }),
+                  )
+                : Effect.void,
+          }),
+        );
+        const now = "2026-01-01T00:00:00.000Z";
 
-      yield* harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-for-stop"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-for-stop"),
           threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "codex",
-          providerInstanceId: ProviderInstanceId.make("codex_work"),
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: now,
-        },
-        createdAt: now,
-      });
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: alreadyStopped ? "stopped" : "ready",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex_work"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
 
-      yield* harness.engine.dispatch({
-        type: "thread.session.stop",
-        commandId: CommandId.make("cmd-session-stop"),
-        threadId: ThreadId.make("thread-1"),
-        createdAt: now,
-      });
+        // Persisted requests need not be in the engine's capped activity window.
+        // They can also arrive with timestamps later than the stop request.
+        yield* Effect.promise(() =>
+          harness.runEffect(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              const requestedAt = "2026-01-01T00:00:01.000Z";
+              yield* sql`INSERT INTO projection_pending_approvals
+              (request_id, thread_id, turn_id, status, decision, created_at, resolved_at)
+              VALUES ('pending-approval', 'thread-1', NULL, 'pending', NULL, ${requestedAt}, NULL),
+                ('accepted-approval', 'thread-1', NULL, 'resolved', 'accept', ${requestedAt}, ${requestedAt})`;
+              for (const [requestId, kind] of [
+                ["pending-approval", "approval.requested"],
+                ["accepted-approval", "approval.requested"],
+                ["native-input", "user-input.requested"],
+                ...(messageInput ? [["message-input", "user-input.requested"]] : []),
+              ]) {
+                yield* sql`INSERT INTO projection_thread_activities
+                (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+                VALUES (${requestId}, 'thread-1', NULL, 'approval', ${kind}, 'Pending request',
+                  json_object('requestId', ${requestId}, 'responseMode', ${requestId === "message-input" ? "message" : null}), ${requestedAt})`;
+              }
+              // Unsequenced resolutions sort before sequenced provider requests.
+              yield* sql`INSERT INTO projection_thread_activities
+                (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+                VALUES
+                  ('closed-input-requested', 'thread-1', NULL, 'approval', 'user-input.requested',
+                    'Question', '{"requestId":"closed-input"}', 1, ${now}),
+                  ('closed-input-resolved', 'thread-1', NULL, 'info', 'user-input.resolved',
+                    'Answered', '{"requestId":"closed-input"}', NULL, ${requestedAt}),
+                  ('stale-input-requested', 'thread-1', NULL, 'approval', 'user-input.requested',
+                    'Question', '{"requestId":"stale-input"}', 2, ${now}),
+                  ('stale-input-failed', 'thread-1', NULL, 'error', 'provider.user-input.respond.failed',
+                    'Expired', '{"requestId":"stale-input","detail":"Unknown pending Codex user input request: stale-input"}', NULL, ${requestedAt})`;
+              yield* sql`UPDATE projection_threads
+              SET pending_approval_count = 1, pending_user_input_count = ${messageInput ? 2 : 1}
+              WHERE thread_id = 'thread-1'`;
+            }),
+          ),
+        );
 
-      yield* Effect.promise(() => harness.drain());
-      expect(harness.stopSession).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
-      const thread = yield* harness.snapshotQuery
-        .getThreadShellById(ThreadId.make("thread-1"))
-        .pipe(Effect.map(Option.getOrThrow));
-      expect(thread.session).not.toBeNull();
-      expect(thread.session?.status).toBe("stopped");
-      expect(thread.session?.threadId).toBe("thread-1");
-      expect(thread.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
-      expect(thread.session?.activeTurnId).toBeNull();
-    }),
+        for (const taskType of ["agent", "monitor"]) {
+          harness.backgroundLiveness.recordTaskLiveness({
+            threadId: "thread-1",
+            taskId: taskType,
+            taskType,
+            status: "running",
+            kind: "started",
+          });
+        }
+        const beforeStop = Option.getOrThrow(
+          yield* harness.snapshotQuery.getThreadShellById(ThreadId.make("thread-1")),
+        );
+        expect(beforeStop.backgroundLiveness).toBe("working");
+        expect(beforeStop.hasPendingApprovals).toBe(true);
+        expect(beforeStop.hasPendingUserInput).toBe(true);
+
+        if (archived) {
+          yield* harness.engine.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("cmd-archive-for-stop"),
+            threadId: ThreadId.make("thread-1"),
+          });
+        }
+
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-session-stop"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        });
+
+        yield* Effect.promise(() => harness.drain());
+        if (alreadyStopped) expect(harness.stopSession).not.toHaveBeenCalled();
+        else
+          expect(harness.stopSession).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
+        const thread = yield* harness.snapshotQuery
+          .getThreadShellById(ThreadId.make("thread-1"), { includeArchived: archived })
+          .pipe(Effect.map(Option.getOrThrow));
+        expect(thread.session).not.toBeNull();
+        expect(thread.session?.status).toBe(stopFailed ? "ready" : "stopped");
+        expect(thread.backgroundLiveness).toBe(stopFailed ? "working" : null);
+        expect(thread.hasPendingApprovals).toBe(stopFailed);
+        expect(thread.hasPendingUserInput).toBe(stopFailed || messageInput);
+        expect(thread.session?.threadId).toBe("thread-1");
+        expect(thread.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
+        expect(thread.session?.activeTurnId).toBeNull();
+        const requests = yield* Effect.promise(() =>
+          harness.runEffect(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              return yield* sql<{ requestId: string; status: string; decision: string | null }>`
+              SELECT request_id AS "requestId", status, decision
+              FROM projection_pending_approvals ORDER BY request_id`;
+            }),
+          ),
+        );
+        expect(requests).toEqual([
+          { requestId: "accepted-approval", status: "resolved", decision: "accept" },
+          {
+            requestId: "pending-approval",
+            status: stopFailed ? "pending" : "resolved",
+            decision: stopFailed ? null : "cancel",
+          },
+        ]);
+        const dismissals = yield* Effect.promise(() =>
+          harness.runEffect(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              return yield* sql<{ requestId: string }>`
+              SELECT json_extract(payload_json, '$.requestId') AS "requestId"
+              FROM projection_thread_activities
+              WHERE kind = 'user-input.resolved' AND activity_id != 'closed-input-resolved'
+              ORDER BY activity_id`;
+            }),
+          ),
+        );
+        expect(dismissals).toEqual(stopFailed ? [] : [{ requestId: "native-input" }]);
+      }),
   );
 
   effectIt.effect("stops a ready provider session after automatic settlement", () =>

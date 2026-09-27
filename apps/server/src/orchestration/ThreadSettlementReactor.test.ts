@@ -1592,6 +1592,20 @@ describe("storage cleanup", () => {
     "policy-extended",
     "files-disabled",
     "files-extended",
+    "archived",
+    "archived-unowned",
+    "archived-other-owner",
+    "archived-shared",
+    "archived-dirty",
+    "archived-ignored",
+    "archived-project-root",
+    "archived-project-off",
+    "archived-session",
+    "archived-provider",
+    "archived-unarchived",
+    "archived-event",
+    "archived-session-stopped",
+    "archived-terminal-closed",
   ] as const) {
     it.effect(
       `retains protected worktrees (${protection}) and expires only old artifacts and rotated logs`,
@@ -1601,6 +1615,7 @@ describe("storage cleanup", () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const config = yield* ServerConfig;
+          const archiveRule = protection.startsWith("archived");
           const worktreePath = path.join(config.worktreesDir, "feature");
           yield* fs.makeDirectory(worktreePath, { recursive: true });
           yield* fs.writeFileString(path.join(worktreePath, ".git"), "gitdir: /test/admin");
@@ -1612,7 +1627,11 @@ describe("storage cleanup", () => {
               "gitdir: /test/admin-two",
             );
           }
-          if (protection === "ignored" || protection === "deleted-ignored")
+          if (
+            protection === "ignored" ||
+            protection === "deleted-ignored" ||
+            protection === "archived-ignored"
+          )
             yield* fs.writeFileString(path.join(worktreePath, ".env"), "secret");
           if (protection === "ignored-directory") {
             yield* fs.makeDirectory(path.join(worktreePath, ".cache"));
@@ -1631,12 +1650,15 @@ describe("storage cleanup", () => {
           yield* fs.writeFileString(recentImage, "recent");
           const recent = DateTime.toDateUtc(DateTime.makeUnsafe(NOW));
           yield* fs.utimes(recentImage, recent, recent);
-          const thread = makeThread("storage-thread", {
+          let thread = makeThread("storage-thread", {
             branch: "feature",
             worktreePath,
+            archivedAt: archiveRule && protection !== "archived-event" ? NOW : null,
             latestUserMessageAt:
               protection === "recent" ? "2026-08-26T00:00:00.000Z" : "2026-08-01T00:00:00.000Z",
-            ...(protection === "session"
+            ...(protection === "session" ||
+            protection === "archived-session" ||
+            protection === "archived-session-stopped"
               ? {
                   session: {
                     threadId: ThreadId.make("storage-thread"),
@@ -1651,6 +1673,11 @@ describe("storage cleanup", () => {
               : {}),
           });
           const snapshotRead = yield* Deferred.make<void>();
+          const eventSnapshotRead = yield* Deferred.make<void>();
+          let eventPublished = false;
+          let emitTerminalMetadata:
+            | Parameters<TerminalManager["Service"]["subscribeMetadata"]>[0]
+            | undefined;
           const deletionStarted = yield* Deferred.make<void>();
           const deletionStopped = yield* Deferred.make<void>();
           if (protection !== "deleted-event") yield* Deferred.succeed(deletionStopped, undefined);
@@ -1673,7 +1700,9 @@ describe("storage cleanup", () => {
               ServerSettingsService.layerTest({
                 projectSettingsOverrides: {
                   [PROJECT_ID]:
-                    protection === "project-off" || protection === "deleted-project-off"
+                    protection === "project-off" ||
+                    protection === "deleted-project-off" ||
+                    protection === "archived-project-off"
                       ? { worktreeCleanup: { mode: "off" as const } }
                       : protection === "project-custom" || protection === "deleted-project-custom"
                         ? {
@@ -1691,7 +1720,11 @@ describe("storage cleanup", () => {
                 },
                 storageCleanup: {
                   worktreeAfterDays:
-                    deleteRule || mergeRule || unchangedRule || protection === "project-custom"
+                    archiveRule ||
+                    deleteRule ||
+                    mergeRule ||
+                    unchangedRule ||
+                    protection === "project-custom"
                       ? null
                       : 8,
                   worktreeOnDelete: deleteRule && protection !== "deleted-project-custom",
@@ -1729,6 +1762,13 @@ describe("storage cleanup", () => {
                     ),
                 }),
                 Layer.mock(ProjectionSnapshotQuery)({
+                  getThreadShellById: (threadId, options) =>
+                    Effect.succeed(
+                      threadId === thread.id &&
+                        (thread.archivedAt === null || options?.includeArchived === true)
+                        ? Option.some(thread)
+                        : Option.none(),
+                    ),
                   getDeletedWorktreeThreads: () =>
                     Effect.succeed(
                       tombstoned
@@ -1752,29 +1792,38 @@ describe("storage cleanup", () => {
                   getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 2 }),
                   getShellSnapshot: () =>
                     Deferred.succeed(snapshotRead, undefined).pipe(
+                      Effect.andThen(() =>
+                        eventPublished
+                          ? Deferred.succeed(eventSnapshotRead, undefined)
+                          : Effect.void,
+                      ),
                       Effect.andThen(
                         Effect.sync(() => {
                           snapshotReads++;
+                          if (protection === "archived-unarchived" && snapshotReads > 1)
+                            thread = { ...thread, archivedAt: null };
                           const projects =
                             protection.startsWith("deleted-owner") ||
                             protection === "deleted-project-off" ||
                             protection === "deleted-project-custom"
                               ? []
                               : [makeProject(PROJECT_ID, config.baseDir)];
-                          const threads = tombstoned ? [] : [thread];
+                          const threads = tombstoned || thread.archivedAt !== null ? [] : [thread];
                           if (protection === "deleted-shared")
                             threads.push({ ...thread, id: ThreadId.make("surviving-thread") });
                           if (protection === "deleted-project")
                             projects.push(makeProject(LINKED_PROJECT_ID, worktreePath));
                           if (
                             protection === "project-root" ||
+                            protection === "archived-project-root" ||
                             protection === "nested-project" ||
                             (protection === "new-nested-project" && snapshotReads > 1)
                           ) {
                             projects.push(
                               makeProject(
                                 LINKED_PROJECT_ID,
-                                protection === "project-root"
+                                protection === "project-root" ||
+                                  protection === "archived-project-root"
                                   ? worktreePath
                                   : path.join(worktreePath, "nested"),
                               ),
@@ -1798,15 +1847,18 @@ describe("storage cleanup", () => {
                   getArchivedShellSnapshot: () =>
                     Effect.succeed(
                       makeSnapshot(
-                        protection === "shared"
+                        protection === "shared" || protection === "archived-shared"
                           ? [
+                              ...(thread.archivedAt !== null ? [thread] : []),
                               {
                                 ...thread,
                                 id: ThreadId.make("archived-sharing-thread"),
                                 archivedAt: NOW,
                               },
                             ]
-                          : [],
+                          : thread.archivedAt !== null
+                            ? [thread]
+                            : [],
                       ),
                     ),
                 }),
@@ -1835,7 +1887,7 @@ describe("storage cleanup", () => {
                 Layer.mock(ProviderService)({
                   listSessions: () =>
                     Effect.succeed(
-                      protection === "deleted-provider"
+                      protection === "deleted-provider" || protection === "archived-provider"
                         ? [
                             {
                               threadId: thread.id,
@@ -1851,6 +1903,14 @@ describe("storage cleanup", () => {
                     ),
                 }),
                 Layer.mock(GitVcsDriver)({
+                  getWorktreeOwner: () =>
+                    Effect.succeed(
+                      protection === "archived-other-owner"
+                        ? ThreadId.make("another-thread")
+                        : archiveRule && protection !== "archived-unowned"
+                          ? thread.id
+                          : null,
+                    ),
                   resolvePrimaryRemoteName: () => Effect.succeed("origin"),
                   resolveDefaultBranchName: () => Effect.succeed("main"),
                   fetchRemoteTrackingBranch: (input) =>
@@ -1883,7 +1943,9 @@ describe("storage cleanup", () => {
                       branch: cwd === secondWorktreePath ? "feature-two" : "feature",
                       upstreamRef: null,
                       hasWorkingTreeChanges:
-                        protection === "dirty" || protection === "deleted-dirty",
+                        protection === "dirty" ||
+                        protection === "deleted-dirty" ||
+                        protection === "archived-dirty",
                       workingTree: { files: [], insertions: 0, deletions: 0 },
                       hasUpstream: false,
                       aheadCount: 0,
@@ -1899,7 +1961,9 @@ describe("storage cleanup", () => {
                           : 0,
                       ),
                       stdout:
-                        protection === "ignored" || protection === "deleted-ignored"
+                        protection === "ignored" ||
+                        protection === "deleted-ignored" ||
+                        protection === "archived-ignored"
                           ? ".env\0"
                           : protection === "ignored-directory"
                             ? ".cache/\0"
@@ -1941,17 +2005,24 @@ describe("storage cleanup", () => {
                   },
                 }),
                 Layer.mock(TerminalManager)({
-                  subscribeMetadata: (listener) =>
-                    listener({
+                  subscribeMetadata: (listener) => {
+                    emitTerminalMetadata = listener;
+                    return listener({
                       type: "snapshot",
                       terminals:
-                        protection === "terminal-cwd" || protection === "terminal-worktree"
+                        protection === "terminal-cwd" ||
+                        protection === "terminal-worktree" ||
+                        protection === "archived-terminal-closed"
                           ? [
                               {
-                                threadId: "terminal-thread",
+                                threadId:
+                                  protection === "archived-terminal-closed"
+                                    ? thread.id
+                                    : "terminal-thread",
                                 terminalId: "default",
                                 cwd:
-                                  protection === "terminal-cwd"
+                                  protection === "terminal-cwd" ||
+                                  protection === "archived-terminal-closed"
                                     ? `${worktreePath}${path.sep}`
                                     : config.baseDir,
                                 worktreePath:
@@ -1968,7 +2039,8 @@ describe("storage cleanup", () => {
                               },
                             ]
                           : [],
-                    }).pipe(Effect.as(() => {})),
+                    }).pipe(Effect.as(() => {}));
+                  },
                 }),
               ),
             ),
@@ -1976,6 +2048,50 @@ describe("storage cleanup", () => {
           yield* cleanup.start();
           yield* Deferred.await(snapshotRead);
           yield* cleanup.drain;
+          if (
+            protection === "archived-event" ||
+            protection === "archived-session-stopped" ||
+            protection === "archived-terminal-closed"
+          ) {
+            assert.strictEqual(yield* fs.exists(worktreePath), true);
+            eventPublished = true;
+            const eventBase = {
+              sequence: 2,
+              eventId: EventId.make("storage-thread-archived"),
+              aggregateKind: "thread" as const,
+              aggregateId: thread.id,
+              occurredAt: NOW,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+            };
+            if (protection === "archived-terminal-closed") {
+              assert.isDefined(emitTerminalMetadata);
+              yield* emitTerminalMetadata!({
+                type: "remove",
+                threadId: thread.id,
+                terminalId: "default",
+              });
+            } else if (protection === "archived-session-stopped") {
+              const session = { ...thread.session!, status: "stopped" as const };
+              thread = { ...thread, session };
+              yield* PubSub.publish(domainEvents, {
+                ...eventBase,
+                type: "thread.session-set",
+                payload: { threadId: thread.id, session },
+              });
+            } else {
+              thread = { ...thread, archivedAt: NOW };
+              yield* PubSub.publish(domainEvents, {
+                ...eventBase,
+                type: "thread.archived",
+                payload: { threadId: thread.id, archivedAt: NOW, updatedAt: NOW },
+              });
+            }
+            yield* Deferred.await(eventSnapshotRead);
+            yield* cleanup.drain;
+          }
           if (protection === "deleted-event") {
             assert.strictEqual(yield* fs.exists(worktreePath), true);
             tombstoned = true;
@@ -2008,7 +2124,12 @@ describe("storage cleanup", () => {
             protection === "files-extended" ||
             protection === "merged" ||
             protection === "unchanged" ||
-            protection === "unchanged-two-worktrees";
+            protection === "unchanged-two-worktrees" ||
+            protection === "archived" ||
+            protection === "archived-project-off" ||
+            protection === "archived-event" ||
+            protection === "archived-session-stopped" ||
+            protection === "archived-terminal-closed";
           assert.strictEqual(yield* fs.exists(worktreePath), !removed);
           assert.deepStrictEqual(
             removals,
@@ -2027,9 +2148,15 @@ describe("storage cleanup", () => {
           assert.strictEqual(yield* fs.exists(activeLog), true);
         }).pipe(
           Effect.provide(
-            ServerConfig.layerTest(process.cwd(), { prefix: "t3-storage-cleanup-" }).pipe(
-              Layer.provideMerge(NodeServices.layer),
-            ),
+            Layer.unwrap(
+              Effect.gen(function* () {
+                const fs = yield* FileSystem.FileSystem;
+                const baseDir = yield* fs
+                  .makeTempDirectoryScoped({ prefix: "t3-storage-cleanup-" })
+                  .pipe(Effect.flatMap(fs.realPath));
+                return ServerConfig.layerTest(process.cwd(), baseDir);
+              }),
+            ).pipe(Layer.provideMerge(NodeServices.layer)),
           ),
           Effect.scoped,
         ),

@@ -2577,6 +2577,7 @@ export const make = Effect.gen(function* () {
 
       const worktree = yield* gitCore.createWorktree(
         {
+          ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
           cwd: input.cwd,
           refName: localPullRequestBranch,
           path: null,
