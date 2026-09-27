@@ -2731,7 +2731,7 @@ describe("ProviderCommandReactor", () => {
         refName: "feature/restore",
         path: worktreePath,
       },
-      { submodules: null },
+      { submodules: null, ownerThreadId: ThreadId.make("thread-1") },
     );
     expect(harness.createWorktree.mock.invocationCallOrder[0]).toBeLessThan(
       harness.startSession.mock.invocationCallOrder[0]!,
@@ -4342,46 +4342,56 @@ describe("ProviderCommandReactor", () => {
     expect(resolvedActivity).toBeUndefined();
   });
 
-  effectIt.effect("stops a provider session without reading unrelated message bodies", () =>
-    Effect.gen(function* () {
-      const harness = yield* Effect.promise(() => createHarness({ unreadableHistory: true }));
-      const now = "2026-01-01T00:00:00.000Z";
+  effectIt.effect.each([false, true])(
+    "stops a provider session without reading unrelated message bodies (archived: %s)",
+    (archived) =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness({ unreadableHistory: true }));
+        const now = "2026-01-01T00:00:00.000Z";
 
-      yield* harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-for-stop"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-for-stop"),
           threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "codex",
-          providerInstanceId: ProviderInstanceId.make("codex_work"),
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: now,
-        },
-        createdAt: now,
-      });
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex_work"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
 
-      yield* harness.engine.dispatch({
-        type: "thread.session.stop",
-        commandId: CommandId.make("cmd-session-stop"),
-        threadId: ThreadId.make("thread-1"),
-        createdAt: now,
-      });
+        if (archived) {
+          yield* harness.engine.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("cmd-archive-for-stop"),
+            threadId: ThreadId.make("thread-1"),
+          });
+        }
 
-      yield* Effect.promise(() => harness.drain());
-      expect(harness.stopSession).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
-      const thread = yield* harness.snapshotQuery
-        .getThreadShellById(ThreadId.make("thread-1"))
-        .pipe(Effect.map(Option.getOrThrow));
-      expect(thread.session).not.toBeNull();
-      expect(thread.session?.status).toBe("stopped");
-      expect(thread.session?.threadId).toBe("thread-1");
-      expect(thread.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
-      expect(thread.session?.activeTurnId).toBeNull();
-    }),
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-session-stop"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        });
+
+        yield* Effect.promise(() => harness.drain());
+        expect(harness.stopSession).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
+        const thread = yield* harness.snapshotQuery
+          .getThreadShellById(ThreadId.make("thread-1"), { includeArchived: archived })
+          .pipe(Effect.map(Option.getOrThrow));
+        expect(thread.session).not.toBeNull();
+        expect(thread.session?.status).toBe("stopped");
+        expect(thread.session?.threadId).toBe("thread-1");
+        expect(thread.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
+        expect(thread.session?.activeTurnId).toBeNull();
+      }),
   );
 
   effectIt.effect("stops a ready provider session after automatic settlement", () =>

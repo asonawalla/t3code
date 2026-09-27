@@ -2582,6 +2582,7 @@ export const make = Effect.gen(function* () {
           path: null,
         },
         {
+          ...(input.threadId !== undefined ? { ownerThreadId: input.threadId } : {}),
           // Best effort: a settings read failure falls back to the checkout's t3.json.
           submodules: yield* projectSettingsFor(input).pipe(
             Effect.map((settings) => settings.worktreeSubmodules),

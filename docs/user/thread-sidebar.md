@@ -35,6 +35,11 @@ state, including its pinned position, and reopens an archived thread you were
 viewing. `mod+z` triggers the most recent Undo when no text field is focused; see
 [Keybindings](./keybindings.md#commands-with-special-behavior).
 
+Archiving removes a worktree created for that thread once its session and terminals stop.
+Shared worktrees, uncommitted changes, and ignored files other than `node_modules` prevent
+removal. The branch and conversation stay; sending another message after unarchiving
+recreates the checkout. Older worktrees without a recorded owner are kept.
+
 On web and desktop, you can also drag files from your computer onto any thread row:
 the thread opens and the files are attached in its composer, ready for
 your next message. The same per-message file limits apply as when attaching

@@ -5343,8 +5343,11 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         cwd: repoDir,
         reference: "90",
         mode: "worktree",
+        threadId: asThreadId("thread-pr-owner"),
       });
       const worktreePath = created.worktreePath as string;
+      const driver = yield* GitVcsDriver.GitVcsDriver;
+      expect(yield* driver.getWorktreeOwner(worktreePath)).toBe("thread-pr-owner");
       expect(
         (yield* runGit(worktreePath, ["rev-parse", "--abbrev-ref", "@{upstream}"], true)).exitCode,
       ).not.toBe(0);
@@ -5362,6 +5365,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         cwd: repoDir,
         reference: "90",
         mode: "worktree",
+        threadId: asThreadId("thread-pr-reusing"),
       });
 
       expect(result.worktreePath && NodeFS.realpathSync.native(result.worktreePath)).toBe(
@@ -5369,6 +5373,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       );
       expect(result.isOnPullRequestHead).toBe(true);
       expect((yield* runGit(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(updatedHead);
+      expect(yield* driver.getWorktreeOwner(worktreePath)).toBe("thread-pr-owner");
     }),
   );
 

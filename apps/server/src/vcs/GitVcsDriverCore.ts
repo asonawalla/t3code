@@ -21,6 +21,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   GitCommandError,
   T3_PROJECT_FILE_NAME,
+  ThreadId,
   type ReviewDiffFileContentsInput,
   type ReviewDiffPreviewInput,
   type ReviewDiffFileStat,
@@ -43,6 +44,7 @@ import {
 import { ServerConfig } from "../config.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const decodeThreadId = Schema.decodeOption(ThreadId);
 const gitProcesses = Semaphore.makeUnsafe(8);
 // `git worktree add` checks out the full tree, so on large repositories it can
 // take well beyond the default 30s (e.g. a 375k-file repo takes ~40s on an idle
@@ -3062,6 +3064,24 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
 
+  const worktreeOwnerPath = Effect.fnUntraced(function* (cwd: string) {
+    const gitDir = yield* runGitStdout("GitVcsDriver.worktreeOwnerPath", cwd, [
+      "rev-parse",
+      "--absolute-git-dir",
+    ]);
+    return path.join(gitDir.trim(), "t3-thread-owner");
+  });
+
+  const getWorktreeOwner: GitVcsDriver.GitVcsDriver["Service"]["getWorktreeOwner"] = Effect.fn(
+    "getWorktreeOwner",
+  )(function* (cwd) {
+    const marker = yield* worktreeOwnerPath(cwd);
+    return yield* fileSystem.readFileString(marker).pipe(
+      Effect.map((owner) => Option.getOrNull(decodeThreadId(owner.trim()))),
+      Effect.orElseSucceed(() => null),
+    );
+  });
+
   const createWorktree: GitVcsDriver.GitVcsDriver["Service"]["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input, options) {
@@ -3101,6 +3121,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
     if (progress?.onWorktreeClaimed) {
       yield* progress.onWorktreeClaimed(worktreePath);
+    }
+
+    const ownerThreadId = options?.ownerThreadId;
+    if (ownerThreadId !== undefined) {
+      // Git's per-worktree admin directory survives branch renames without
+      // adding files to the checkout or claiming a reused worktree.
+      yield* worktreeOwnerPath(worktreePath).pipe(
+        Effect.flatMap((marker) => fileSystem.writeFileString(marker, ownerThreadId)),
+        Effect.catch((error) =>
+          Effect.logWarning("could not record worktree owner", { worktreePath, error }),
+        ),
+      );
     }
 
     // `git worktree add` leaves submodules empty, so a repo that keeps agent
@@ -3684,6 +3716,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     listRefs,
     createWorktree: (input, options) =>
       withListRefsInvalidation(input.cwd, createWorktree(input, options)),
+    getWorktreeOwner,
     fetchPullRequestBranch: (input) =>
       withListRefsInvalidation(input.cwd, fetchPullRequestBranch(input)),
     fetchPullRequestHeadCommit,

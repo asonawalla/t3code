@@ -1286,10 +1286,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const getActiveThreadRowById = SqlSchema.findOneOption({
-    Request: ThreadIdLookupInput,
+  const getThreadRowById = SqlSchema.findOneOption({
+    Request: Schema.Struct({
+      threadId: ThreadId,
+      includeArchived: Schema.optional(Schema.Boolean),
+    }),
     Result: ProjectionThreadDbRowSchema,
-    execute: ({ threadId }) =>
+    execute: ({ threadId, includeArchived }) =>
       sql`
         SELECT
           thread_id AS "threadId",
@@ -1326,7 +1329,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
-          AND archived_at IS NULL
+          ${includeArchived ? sql`` : sql`AND archived_at IS NULL`}
         LIMIT 1
       `,
   });
@@ -3262,10 +3265,13 @@ pending_approval_requests AS (
       });
     });
 
-  const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
+  const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (
+    threadId,
+    options,
+  ) =>
     Effect.gen(function* () {
       const [threadRow, latestTurnRow, sessionRow, pullRequestRows] = yield* Effect.all([
-        getActiveThreadRowById({ threadId }).pipe(
+        getThreadRowById({ threadId, includeArchived: options?.includeArchived === true }).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadShellById:getThread:query",
@@ -3539,7 +3545,7 @@ pending_approval_requests AS (
         latestTurnRow,
         sessionRow,
       ] = yield* Effect.all([
-        getActiveThreadRowById({ threadId }).pipe(
+        getThreadRowById({ threadId }).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadDetailById:getThread:query",
