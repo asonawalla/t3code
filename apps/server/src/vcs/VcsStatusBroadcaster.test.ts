@@ -17,6 +17,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import type {
   BackgroundScope,
+  GitRunStackedActionResult,
   VcsStatusLocalResult,
   VcsStatusRemoteResult,
   VcsStatusResult,
@@ -68,6 +69,31 @@ const baseStatus: VcsStatusResult = {
   ...baseLocalStatus,
   ...baseRemoteStatus,
 };
+
+const createdPullRequestResult = {
+  action: "create_pr",
+  branch: { status: "skipped_not_requested", name: "feature/status-broadcast" },
+  commit: { status: "skipped_not_requested" },
+  push: { status: "pushed" },
+  pr: {
+    status: "created",
+    number: 2978,
+    title: "Publish created pull requests immediately",
+    url: "https://github.com/pingdotgg/t3code/pull/2978",
+    headBranch: "remote-feature-name",
+    baseBranch: "main",
+  },
+  toast: { title: "PR created", cta: { kind: "none" } },
+} satisfies GitRunStackedActionResult;
+
+const createdPullRequestStatus = {
+  number: createdPullRequestResult.pr.number,
+  title: createdPullRequestResult.pr.title,
+  url: createdPullRequestResult.pr.url,
+  headRef: createdPullRequestResult.pr.headBranch,
+  baseRef: createdPullRequestResult.pr.baseBranch,
+  state: "open",
+} satisfies VcsStatusRemoteResult["pr"];
 
 function makeTestLayer(state: {
   currentLocalStatus: VcsStatusLocalResult;
@@ -145,6 +171,177 @@ function makeBackgroundPolicyLayer(shouldRunScopeWork: (scope: BackgroundScope) 
 }
 
 describe("VcsStatusBroadcaster", () => {
+  it.effect("publishes current status after creation, including an aliased head branch", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: { ...baseRemoteStatus, aheadCount: 3, pr: createdPullRequestStatus },
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      assert.isTrue(
+        yield* broadcaster.publishCreatedPullRequest("/repo", createdPullRequestResult),
+      );
+      const status = yield* broadcaster.getStatus({ cwd: "/repo" });
+      assert.deepStrictEqual(status.pr, createdPullRequestStatus);
+      assert.equal(status.refName, createdPullRequestResult.branch.name);
+      assert.equal(status.aheadCount, 3);
+      assert.isTrue(status.hasUpstream);
+      assert.equal(state.remoteStatusCalls, 1);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
+
+  it.effect("publishes post-push counts only to the matching cwd and branch", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: { ...baseRemoteStatus, aheadCount: 2, behindCount: 1 },
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster.getStatus({ cwd: "/repo" });
+      yield* broadcaster.getStatus({ cwd: "/other" });
+      const subscribed = yield* Deferred.make<void>();
+      const published = yield* Deferred.make<VcsStatusStreamEvent>();
+      yield* broadcaster
+        .streamStatus(
+          { cwd: "/repo" },
+          {
+            automaticRemoteRefreshInterval: Effect.succeed(Duration.zero),
+          },
+        )
+        .pipe(
+          Stream.runForEach((event) =>
+            event._tag === "snapshot"
+              ? Deferred.succeed(subscribed, undefined)
+              : event._tag === "remoteUpdated"
+                ? Deferred.succeed(published, event)
+                : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+      yield* Deferred.await(subscribed);
+      state.currentRemoteStatus = { ...baseRemoteStatus, pr: createdPullRequestStatus };
+      yield* broadcaster.publishCreatedPullRequest("/repo", createdPullRequestResult);
+      assert.deepStrictEqual(yield* Deferred.await(published), {
+        _tag: "remoteUpdated",
+        remote: state.currentRemoteStatus,
+      });
+      assert.isNull((yield* broadcaster.getStatus({ cwd: "/other" })).pr);
+      state.currentLocalStatus = { ...baseLocalStatus, refName: "another-branch" };
+      assert.isFalse(
+        yield* broadcaster.publishCreatedPullRequest("/other", createdPullRequestResult),
+      );
+      assert.isNull((yield* broadcaster.getStatus({ cwd: "/other" })).pr);
+      assert.equal(state.remoteStatusCalls, 3);
+    }).pipe(Effect.provide(makeTestLayer(state)), Effect.scoped);
+  });
+
+  it.effect("preserves counts refreshed while creation checks the local branch", () => {
+    const localReadStarted = Deferred.makeUnsafe<void>();
+    const releaseLocalRead = Deferred.makeUnsafe<void>();
+    let localReads = 0;
+    let remote = baseRemoteStatus;
+    const layer = VcsStatusBroadcaster.layer.pipe(
+      Layer.provideMerge(NodeServices.layer),
+      Layer.provide(makeBackgroundPolicyLayer(() => true)),
+      Layer.provide(
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          localStatus: () =>
+            Effect.gen(function* () {
+              localReads += 1;
+              if (localReads === 2) {
+                yield* Deferred.succeed(localReadStarted, undefined);
+                yield* Deferred.await(releaseLocalRead);
+              }
+              return baseLocalStatus;
+            }),
+          remoteStatus: () => Effect.sync(() => remote),
+          invalidateLocalStatus: () => Effect.void,
+        }),
+      ),
+    );
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster.getStatus({ cwd: "/repo" });
+      const publish = yield* broadcaster
+        .publishCreatedPullRequest("/repo", createdPullRequestResult)
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(localReadStarted);
+      remote = { ...baseRemoteStatus, aheadCount: 3, pr: createdPullRequestStatus };
+      yield* broadcaster.refreshPullRequestStatus("/repo");
+      yield* Deferred.succeed(releaseLocalRead, undefined);
+      assert.isTrue(yield* Fiber.join(publish));
+      const status = yield* broadcaster.getStatus({ cwd: "/repo" });
+      assert.equal(status.aheadCount, 3);
+      assert.deepStrictEqual(status.pr, createdPullRequestStatus);
+    }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+
+  for (const read of ["getStatus", "refreshStatus", "refreshPullRequestStatus"] as const) {
+    it.effect(
+      `creation bypasses an in-flight ${read} and its older result cannot erase the PR`,
+      () => {
+        const readStarted = Deferred.makeUnsafe<void>();
+        const releaseRead = Deferred.makeUnsafe<void>();
+        let remoteReads = 0;
+        const layer = VcsStatusBroadcaster.layer.pipe(
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provide(makeBackgroundPolicyLayer(() => true)),
+          Layer.provide(
+            Layer.mock(GitWorkflowService.GitWorkflowService)({
+              localStatus: () => Effect.succeed(baseLocalStatus),
+              remoteStatus: () =>
+                Effect.gen(function* () {
+                  remoteReads += 1;
+                  const remote =
+                    remoteReads > (read === "getStatus" ? 1 : 2)
+                      ? { ...baseRemoteStatus, pr: createdPullRequestStatus }
+                      : baseRemoteStatus;
+                  if (remoteReads === (read === "getStatus" ? 1 : 2)) {
+                    yield* Deferred.succeed(readStarted, undefined);
+                    yield* Deferred.await(releaseRead);
+                  }
+                  return remote;
+                }),
+              invalidateLocalStatus: () => Effect.void,
+              invalidateStatus: () => Effect.void,
+            }),
+          ),
+        );
+        return Effect.gen(function* () {
+          const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+          if (read !== "getStatus") yield* broadcaster.getStatus({ cwd: "/repo" });
+          const pendingRead = yield* (
+            read === "getStatus"
+              ? broadcaster.getStatus({ cwd: "/repo" })
+              : broadcaster[read]("/repo")
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(readStarted);
+          yield* broadcaster.publishCreatedPullRequest("/repo", createdPullRequestResult);
+          assert.deepStrictEqual(
+            (yield* broadcaster.getStatus({ cwd: "/repo" })).pr,
+            createdPullRequestStatus,
+          );
+          yield* Deferred.succeed(releaseRead, undefined);
+          yield* Fiber.join(pendingRead);
+          assert.deepStrictEqual(
+            (yield* broadcaster.getStatus({ cwd: "/repo" })).pr,
+            createdPullRequestStatus,
+          );
+        }).pipe(Effect.provide(layer), Effect.scoped);
+      },
+    );
+  }
+
   it.effect.skipIf(!symlinksSupported)(
     "automatically pulls an enabled clean default branch when status detects it is behind",
     () => {

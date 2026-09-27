@@ -487,6 +487,50 @@ describe("GitHubCli.layer", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  it.effect("returns created pull request identities without a follow-up lookup", () =>
+    Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      for (const url of [
+        "https://github.com/octocat/project/pull/42",
+        "https://github.acme.test/platform/project/pull/42",
+      ]) {
+        mockRun.mockReturnValueOnce(Effect.succeed(processOutput(`  ${url}\n`)));
+        const result = yield* gh.createPullRequest({
+          cwd: "/repo",
+          baseBranch: "main",
+          headSelector: "octocat:feature",
+          title: "Feature",
+          bodyFile: "/tmp/body.md",
+        });
+        assert.deepStrictEqual(result, { url, number: 42 });
+      }
+      expect(mockRun).toHaveBeenCalledTimes(2);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("leaves successful creation discoverable when output has no valid GitHub PR URL", () =>
+    Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      for (const stdout of [
+        "",
+        "Created pull request",
+        "https://github.com/octocat/project/pull/0",
+        "https://github.com/octocat/project/issues/42",
+        "https://gitlab.com/octocat/project/-/merge_requests/42",
+      ]) {
+        mockRun.mockReturnValueOnce(Effect.succeed(processOutput(stdout)));
+        const result = yield* gh.createPullRequest({
+          cwd: "/repo",
+          baseBranch: "main",
+          headSelector: "octocat:feature",
+          title: "Feature",
+          bodyFile: "/tmp/body.md",
+        });
+        assert.isUndefined(result);
+      }
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("reads repository clone URLs", () =>
     Effect.gen(function* () {
       mockRun.mockReturnValueOnce(
