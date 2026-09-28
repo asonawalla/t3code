@@ -110,6 +110,7 @@ import * as PullRequestReadCache from "./pullRequest/PullRequestReadCache.ts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as WorktreeTeardown from "./project/WorktreeTeardown.ts";
 import * as Observability from "./observability/Observability.ts";
 import * as HeapSnapshot from "./observability/HeapSnapshot.ts";
 import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
@@ -385,6 +386,13 @@ const layerVcs = Layer.empty.pipe(
   Layer.provideMerge(layerVcsDriverRegistry),
   Layer.provideMerge(VcsProvisioningService.layer.pipe(Layer.provide(layerVcsDriverRegistry))),
   Layer.provideMerge(layerGitWorkflow),
+  // Storage cleanup and the remove-worktree request both remove through it.
+  Layer.provideMerge(
+    WorktreeTeardown.layer.pipe(
+      Layer.provide(RuntimeLayer.layerProjectService),
+      Layer.provide(layerGitWorkflow),
+    ),
+  ),
   Layer.provideMerge(layerReview),
   Layer.provideMerge(layerSourceControlRepositoryService),
   Layer.provideMerge(layerProjectCloneTracker),

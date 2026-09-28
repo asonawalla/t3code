@@ -28,6 +28,7 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as WorktreeTeardown from "./project/WorktreeTeardown.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
@@ -270,6 +271,8 @@ const cleanupFixture = (
     let sessionLive = true;
     let fullStatusCalls = 0;
     let snapshotReads = 0;
+    let teardownFails = false;
+    const teardowns: Array<{ projectCwd: string; worktreePath: string; envFile: boolean }> = [];
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
@@ -344,6 +347,18 @@ const cleanupFixture = (
       Effect.provideService(TerminalManager.TerminalManager, {
         subscribeMetadata: () => Effect.succeed(() => {}),
       } as unknown as TerminalManager.TerminalManager["Service"]),
+      Effect.provideService(WorktreeTeardown.WorktreeTeardown, {
+        run: (input: { projectCwd: string; worktreePath: string }) =>
+          Effect.gen(function* () {
+            const envFile = yield* fs.exists(`${input.worktreePath}/.env`).pipe(Effect.orDie);
+            teardowns.push({ ...input, envFile });
+            if (teardownFails)
+              return yield* new WorktreeTeardown.WorktreeTeardownError({
+                worktreePath: input.worktreePath,
+                exitCode: 1,
+              });
+          }),
+      } as unknown as WorktreeTeardown.WorktreeTeardown["Service"]),
       Effect.provideService(ServerActivation, Deferred.await(activated)),
     );
     return {
@@ -396,6 +411,10 @@ const cleanupFixture = (
       },
       fullStatusCalls: () => fullStatusCalls,
       snapshotReads: () => snapshotReads,
+      teardowns: () => teardowns,
+      failTeardown: () => {
+        teardownFails = true;
+      },
       /** Starts the hourly sweep and the subscription to `domainEvents`, which wait until now. */
       activate: (domainEvents: Stream.Stream<OrchestrationV2DomainEvent>) => {
         events = domainEvents;
@@ -726,6 +745,38 @@ describe("storage cleanup reports and local file policies", () => {
           "late edit\n",
         );
         expect(yield* fixture.fs.exists(`${fixture.worktree}/notes.txt`)).toBe(false);
+      }),
+    ),
+  );
+  it.live("runs the teardown action before cleaning ignored files", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setPolicy("tracked-changes");
+        yield* fixture.fs.writeFileString(`${fixture.worktree}/.env`, "COMPOSE_PROJECT_NAME=x\n");
+        const report = yield* fixture.service.runNow;
+        expect(report.entries[0]).toMatchObject({ outcome: "removed" });
+        // Compose reads .env, so the action runs before git clean deletes it.
+        expect(fixture.teardowns()).toEqual([
+          { projectCwd: fixture.repo, worktreePath: fixture.worktree, envFile: true },
+        ]);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }),
+    ),
+  );
+  it.live("keeps a worktree whose teardown action fails", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setPolicy("tracked-changes");
+        fixture.failTeardown();
+        yield* fixture.fs.writeFileString(`${fixture.worktree}/.env`, "COMPOSE_PROJECT_NAME=x\n");
+        const report = yield* fixture.service.runNow;
+        expect(report.entries[0]).toMatchObject({ outcome: "failed", bytes: null });
+        expect(report.entries[0]?.reason).toContain("teardown action failed");
+        expect(report.bytesFreed).toBe(0);
+        expect(fixture.teardowns()).toHaveLength(1);
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/.env`)).toBe(true);
       }),
     ),
   );

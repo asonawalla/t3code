@@ -42,6 +42,7 @@ import {
   type OrchestrationClientOrigin,
   type OrchestrationV2Command,
   type GitActionProgressEvent,
+  GitCommandError,
   type GitManagerServiceError,
   type MessageId,
   type AcpRegistryImportSessionInput,
@@ -211,6 +212,7 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as WorktreeTeardown from "./project/WorktreeTeardown.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -1279,6 +1281,7 @@ const layerWsRpc = (
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const directEndpoints = yield* DirectEndpoints.DirectEndpoints;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+      const worktreeTeardown = yield* WorktreeTeardown.WorktreeTeardown;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -2894,7 +2897,21 @@ const layerWsRpc = (
         [WS_METHODS.vcsCreateWorktree]: (input) =>
           gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
-          gitWorkflow.removeWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          worktreeTeardown.removeWorktree(input).pipe(
+            Effect.catchTags({
+              WorktreeTeardownError: (error) =>
+                Effect.fail(
+                  new GitCommandError({
+                    operation: "WorktreeTeardown.removeWorktree",
+                    command: "teardown action",
+                    cwd: input.path,
+                    detail: error.message,
+                    cause: error,
+                  }),
+                ),
+            }),
+            Effect.tap(() => refreshGitStatus(input.cwd)),
+          ),
         [WS_METHODS.vcsCreateRef]: (input) =>
           gitWorkflow.createRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsSwitchRef]: (input) =>

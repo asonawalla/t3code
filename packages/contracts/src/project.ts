@@ -38,6 +38,11 @@ export const ProjectScript = Schema.Struct({
   runOnWorktreeCreate: Schema.Boolean,
   /** Run in the thread's worktree each time the thread settles. */
   runOnSettle: Schema.optional(Schema.Boolean),
+  /**
+   * Run headless in a worktree before T3 Code removes it, for example to stop
+   * services the setup script started. A failure keeps the worktree.
+   */
+  runOnWorktreeRemove: Schema.optional(Schema.Boolean),
   /** Start the agent while setup runs unless explicitly disabled. */
   async: Schema.optional(Schema.Boolean),
   previewUrl: Schema.optional(TrimmedNonEmptyString),

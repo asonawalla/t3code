@@ -7,6 +7,7 @@ import {
   projectScriptMenuLabel,
   settleProjectScript,
   setupProjectScript,
+  teardownProjectScript,
 } from "@t3tools/shared/projectScripts";
 
 import {
@@ -28,6 +29,7 @@ describe("projectScripts helpers", () => {
         runOnWorktreeCreate: false,
         waitForSetup: false,
         runOnSettle: false,
+        runOnWorktreeRemove: false,
         previewUrl: "http://localhost:5733",
         autoOpenPreview: true,
       }),
@@ -51,6 +53,7 @@ describe("projectScripts helpers", () => {
         runOnWorktreeCreate: false,
         waitForSetup: false,
         runOnSettle: false,
+        runOnWorktreeRemove: false,
         previewUrl: null,
         autoOpenPreview: false,
       }),
@@ -71,6 +74,7 @@ describe("projectScripts helpers", () => {
       previewUrl: null,
       autoOpenPreview: false,
       runOnSettle: false,
+      runOnWorktreeRemove: false,
     } as const;
     expect(
       buildProjectScript("setup", { ...input, runOnWorktreeCreate: true, waitForSetup: true }),
@@ -81,6 +85,25 @@ describe("projectScripts helpers", () => {
     expect(
       buildProjectScript("setup", { ...input, runOnWorktreeCreate: false, waitForSetup: true }),
     ).not.toHaveProperty("async");
+  });
+
+  it("only records runOnWorktreeRemove for teardown scripts", () => {
+    const input = {
+      name: "Teardown",
+      command: "docker compose down",
+      icon: "configure",
+      runOnWorktreeCreate: false,
+      waitForSetup: false,
+      runOnSettle: false,
+      previewUrl: null,
+      autoOpenPreview: false,
+    } as const;
+    expect(buildProjectScript("teardown", { ...input, runOnWorktreeRemove: true })).toMatchObject({
+      runOnWorktreeRemove: true,
+    });
+    expect(
+      buildProjectScript("teardown", { ...input, runOnWorktreeRemove: false }),
+    ).not.toHaveProperty("runOnWorktreeRemove");
   });
 
   it("builds and parses script run commands", () => {
@@ -114,7 +137,7 @@ describe("projectScripts helpers", () => {
     expect(nextProjectScriptId("!!!", [])).toBe("script");
   });
 
-  it("resolves primary, setup, and settle scripts", () => {
+  it("resolves primary, setup, settle, and teardown scripts", () => {
     const scripts = [
       {
         id: "setup",
@@ -132,6 +155,14 @@ describe("projectScripts helpers", () => {
         runOnSettle: true,
       },
       {
+        id: "down",
+        name: "Down",
+        command: "docker compose down",
+        icon: "configure" as const,
+        runOnWorktreeCreate: false,
+        runOnWorktreeRemove: true,
+      },
+      {
         id: "test",
         name: "Test",
         command: "bun test",
@@ -143,8 +174,13 @@ describe("projectScripts helpers", () => {
     expect(primaryProjectScript(scripts)?.id).toBe("test");
     expect(setupProjectScript(scripts)?.id).toBe("setup");
     expect(settleProjectScript(scripts)?.id).toBe("clean");
+    expect(teardownProjectScript(scripts)?.id).toBe("down");
     // Cleanup is never the one-click run button, even when it is all there is.
-    expect(primaryProjectScript(scripts.filter((script) => script.id === "clean"))).toBeNull();
+    expect(
+      primaryProjectScript(
+        scripts.filter((script) => script.id === "clean" || script.id === "down"),
+      ),
+    ).toBeNull();
   });
 
   it("labels every lifecycle role a script runs in", () => {
@@ -160,9 +196,12 @@ describe("projectScripts helpers", () => {
       "Both (setup, on settle)",
     );
     expect(projectScriptMenuLabel({ ...script, runOnWorktreeCreate: false })).toBe("Both");
+    expect(
+      projectScriptMenuLabel({ ...script, runOnWorktreeCreate: false, runOnWorktreeRemove: true }),
+    ).toBe("Both (teardown)");
   });
 
-  it("moves the setup and settle roles to the script that claims them", () => {
+  it("moves the setup, settle, and teardown roles to the script that claims them", () => {
     const input = {
       name: "Next",
       command: "true",
@@ -179,16 +218,34 @@ describe("projectScripts helpers", () => {
       runOnWorktreeCreate: true,
       runOnSettle: true,
     };
+    const teardown = {
+      id: "teardown",
+      name: "Teardown",
+      command: "docker compose down",
+      icon: "configure" as const,
+      runOnWorktreeCreate: false,
+      runOnWorktreeRemove: true,
+    };
+    const none = { runOnWorktreeCreate: false, runOnSettle: false, runOnWorktreeRemove: false };
 
+    expect(releaseClaimedRoles(holder, { ...input, ...none, runOnSettle: true })).toMatchObject({
+      runOnWorktreeCreate: true,
+      runOnSettle: false,
+    });
     expect(
-      releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: false, runOnSettle: true }),
-    ).toMatchObject({ runOnWorktreeCreate: true, runOnSettle: false });
-    expect(
-      releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: true, runOnSettle: false }),
+      releaseClaimedRoles(holder, { ...input, ...none, runOnWorktreeCreate: true }),
     ).toMatchObject({ runOnWorktreeCreate: false, runOnSettle: true });
+    expect(releaseClaimedRoles(holder, { ...input, ...none })).toBe(holder);
+    // Claiming teardown leaves the setup and settle holder alone.
+    expect(releaseClaimedRoles(holder, { ...input, ...none, runOnWorktreeRemove: true })).toBe(
+      holder,
+    );
     expect(
-      releaseClaimedRoles(holder, { ...input, runOnWorktreeCreate: false, runOnSettle: false }),
-    ).toBe(holder);
+      releaseClaimedRoles(teardown, { ...input, ...none, runOnWorktreeRemove: true }),
+    ).toMatchObject({ runOnWorktreeRemove: false });
+    expect(releaseClaimedRoles(teardown, { ...input, ...none, runOnWorktreeCreate: true })).toBe(
+      teardown,
+    );
   });
 
   it("builds default runtime env for scripts", () => {

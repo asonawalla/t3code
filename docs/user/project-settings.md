@@ -119,6 +119,12 @@ checkouts and removal. Actions belong to a project: editing them creates the pro
 on each selected environment, and reset returns to the environment's shared list. A project's
 `t3.json` actions can be imported there.
 
+An action can run automatically when a worktree is created, or before T3 Code removes one, for
+example to stop services the setup action started. Turn on **Run automatically before worktree
+removal**, or set `"runOnWorktreeRemove": true` on a `t3.json` script. It runs without a terminal
+in your login shell; if it fails or runs past ten minutes, the worktree is kept and the output is
+written to the server log.
+
 Settings a repository can also declare in `t3.json`, such as the workspace for new threads,
 resolve in one order: a project override, then the environment setting, then `t3.json`, then the
 built-in default. Leave a setting on **Inherit** to let the next tier decide.
