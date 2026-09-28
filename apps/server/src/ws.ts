@@ -26,6 +26,7 @@ import {
   type AuthEnvironmentScope,
   AuthSessionId,
   ClientConnectionMethod,
+  GitCommandError,
   ClientDeviceType,
   ClientOs,
   ClientSurface,
@@ -147,6 +148,7 @@ import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as NewProject from "./project/NewProject.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as WorktreeTeardown from "./project/WorktreeTeardown.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
@@ -558,6 +560,7 @@ const makeWsRpcLayer = (
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+      const worktreeTeardown = yield* WorktreeTeardown.WorktreeTeardown;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -3687,7 +3690,22 @@ const makeWsRpcLayer = (
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsRemoveWorktree,
-            gitWorkflow.removeWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            worktreeTeardown.run({ projectCwd: input.cwd, worktreePath: input.path }).pipe(
+              Effect.flatMap((tornDown) =>
+                tornDown
+                  ? gitWorkflow.removeWorktree(input)
+                  : Effect.fail(
+                      new GitCommandError({
+                        operation: "WorktreeTeardown.run",
+                        command: "teardown action",
+                        cwd: input.path,
+                        detail:
+                          "The project's teardown action failed, so the worktree was kept. See the server log for its output.",
+                      }),
+                    ),
+              ),
+              Effect.tap(() => refreshGitStatus(input.cwd)),
+            ),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsCreateRef]: (input) =>

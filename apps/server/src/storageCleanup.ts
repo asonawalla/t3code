@@ -30,6 +30,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ThreadDeletionReactor from "./orchestration/Services/ThreadDeletionReactor.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
+import * as WorktreeTeardown from "./project/WorktreeTeardown.ts";
 import { threadHasQueuedTurnStart } from "./orchestration/ThreadSettlementPolicy.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as Settings from "./serverSettings.ts";
@@ -115,6 +116,7 @@ export const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
   const terminals = yield* TerminalManager.TerminalManager;
+  const teardown = yield* WorktreeTeardown.WorktreeTeardown;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
@@ -391,6 +393,8 @@ export const make = Effect.gen(function* () {
           )
         )
           return;
+        // Stop what the setup action started while the checkout still exists.
+        if (!(yield* teardown.run({ projectCwd: project.workspaceRoot, worktreePath }))) return;
         yield* git.removeWorktree({ cwd: project.workspaceRoot, path: worktreePath, force: false });
         yield* gitManager.invalidateStatus(project.workspaceRoot);
         // Preserve branch and path: ProviderCommandReactor recreates the checkout
