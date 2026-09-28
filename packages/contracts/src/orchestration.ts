@@ -432,6 +432,11 @@ export const ProjectScript = Schema.Struct({
    */
   async: Schema.optional(Schema.Boolean),
   /**
+   * Runs headless in a worktree before T3 Code removes it, for example to stop
+   * services the setup script started. A failure keeps the worktree.
+   */
+  runOnWorktreeRemove: Schema.optional(Schema.Boolean),
+  /**
    * URL to open in the in-app browser preview when this script runs (or
    * when the user explicitly requests a preview). Optional; only honored on
    * the desktop build.

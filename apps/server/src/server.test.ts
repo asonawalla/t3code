@@ -161,6 +161,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
+import * as WorktreeTeardown from "./project/WorktreeTeardown.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -953,6 +954,7 @@ const buildAppUnderTest = (options?: {
           Layer.mock(TerminalManager.TerminalManager)({
             ...options?.layers?.terminalManager,
           }),
+          Layer.mock(WorktreeTeardown.WorktreeTeardown)({ run: () => Effect.succeed(true) }),
           WorktreeSetupTracker.layer,
           ProjectCloneTracker.layer.pipe(
             Layer.provide(

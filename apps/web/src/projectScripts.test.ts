@@ -13,6 +13,7 @@ import {
   nextProjectScriptId,
   primaryProjectScript,
   projectScriptIdFromCommand,
+  releaseWorktreeScriptRoles,
 } from "./projectScripts";
 
 describe("projectScripts helpers", () => {
@@ -24,6 +25,7 @@ describe("projectScripts helpers", () => {
         icon: "debug",
         runOnWorktreeCreate: false,
         waitForSetup: false,
+        runOnWorktreeRemove: false,
         previewUrl: "http://localhost:5733",
         autoOpenPreview: true,
       }),
@@ -46,6 +48,7 @@ describe("projectScripts helpers", () => {
         icon: "test",
         runOnWorktreeCreate: false,
         waitForSetup: false,
+        runOnWorktreeRemove: false,
         previewUrl: null,
         autoOpenPreview: false,
       }),
@@ -63,6 +66,7 @@ describe("projectScripts helpers", () => {
       name: "Setup",
       command: "pnpm i",
       icon: "configure",
+      runOnWorktreeRemove: false,
       previewUrl: null,
       autoOpenPreview: false,
     } as const;
@@ -75,6 +79,55 @@ describe("projectScripts helpers", () => {
     expect(
       buildProjectScript("setup", { ...input, runOnWorktreeCreate: false, waitForSetup: true }),
     ).not.toHaveProperty("async");
+  });
+
+  it("only records runOnWorktreeRemove for teardown scripts", () => {
+    const input = {
+      name: "Teardown",
+      command: "docker compose down",
+      icon: "configure",
+      runOnWorktreeCreate: false,
+      waitForSetup: false,
+      previewUrl: null,
+      autoOpenPreview: false,
+    } as const;
+    expect(buildProjectScript("teardown", { ...input, runOnWorktreeRemove: true })).toMatchObject({
+      runOnWorktreeRemove: true,
+    });
+    expect(
+      buildProjectScript("teardown", { ...input, runOnWorktreeRemove: false }),
+    ).not.toHaveProperty("runOnWorktreeRemove");
+  });
+
+  it("clears only the worktree roles a saved script claims", () => {
+    const setup = {
+      id: "setup",
+      name: "Setup",
+      command: "bun install",
+      icon: "configure" as const,
+      runOnWorktreeCreate: true,
+    };
+    const teardown = {
+      id: "teardown",
+      name: "Teardown",
+      command: "docker compose down",
+      icon: "configure" as const,
+      runOnWorktreeCreate: false,
+      runOnWorktreeRemove: true,
+    };
+    const neither = { runOnWorktreeCreate: false, runOnWorktreeRemove: false };
+
+    expect(releaseWorktreeScriptRoles(setup, neither)).toBe(setup);
+    expect(releaseWorktreeScriptRoles(teardown, neither)).toBe(teardown);
+    expect(
+      releaseWorktreeScriptRoles(setup, { ...neither, runOnWorktreeCreate: true }),
+    ).toMatchObject({ runOnWorktreeCreate: false });
+    expect(releaseWorktreeScriptRoles(setup, { ...neither, runOnWorktreeRemove: true })).toBe(
+      setup,
+    );
+    expect(
+      releaseWorktreeScriptRoles(teardown, { ...neither, runOnWorktreeRemove: true }),
+    ).not.toHaveProperty("runOnWorktreeRemove");
   });
 
   it("builds and parses script run commands", () => {
@@ -128,6 +181,28 @@ describe("projectScripts helpers", () => {
 
     expect(primaryProjectScript(scripts)?.id).toBe("test");
     expect(setupProjectScript(scripts)?.id).toBe("setup");
+  });
+
+  it("does not pick a teardown script as the primary action", () => {
+    const scripts = [
+      {
+        id: "teardown",
+        name: "Teardown",
+        command: "docker compose down",
+        icon: "configure" as const,
+        runOnWorktreeCreate: false,
+        runOnWorktreeRemove: true,
+      },
+      {
+        id: "dev",
+        name: "Dev",
+        command: "bun dev",
+        icon: "play" as const,
+        runOnWorktreeCreate: false,
+      },
+    ];
+
+    expect(primaryProjectScript(scripts)?.id).toBe("dev");
   });
 
   it("builds default runtime env for scripts", () => {

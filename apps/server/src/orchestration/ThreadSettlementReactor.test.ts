@@ -61,6 +61,7 @@ import { ServerConfig } from "../config.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
+import { WorktreeTeardown } from "../project/WorktreeTeardown.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { ThreadDeletionReactor } from "./Services/ThreadDeletionReactor.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
@@ -1607,6 +1608,7 @@ describe("storage cleanup", () => {
     "archived-event",
     "archived-session-stopped",
     "archived-terminal-closed",
+    "archived-teardown-failed",
   ] as const) {
     it.effect(
       `retains protected worktrees (${protection}) and expires only old artifacts and rotated logs`,
@@ -1686,6 +1688,7 @@ describe("storage cleanup", () => {
           const deleteRule = protection.startsWith("deleted");
           let tombstoned = deleteRule && protection !== "deleted-event";
           const removals: string[] = [];
+          const teardowns: string[] = [];
           const mergeRule = protection === "merged" || protection === "unmerged";
           const unchangedRule =
             protection === "unchanged" ||
@@ -2013,6 +2016,14 @@ describe("storage cleanup", () => {
                     return fs.remove(input.path, { recursive: true }).pipe(Effect.orDie);
                   },
                 }),
+                Layer.mock(WorktreeTeardown)({
+                  run: (input) =>
+                    Effect.sync(() => {
+                      assert.strictEqual(input.projectCwd, config.baseDir);
+                      teardowns.push(input.worktreePath);
+                      return protection !== "archived-teardown-failed";
+                    }),
+                }),
                 Layer.mock(TerminalManager)({
                   subscribeMetadata: (listener) => {
                     emitTerminalMetadata = listener;
@@ -2150,6 +2161,10 @@ describe("storage cleanup", () => {
               : removed
                 ? [worktreePath]
                 : [],
+          );
+          assert.deepStrictEqual(
+            teardowns,
+            protection === "archived-teardown-failed" ? [worktreePath] : removals,
           );
           assert.strictEqual(fetches, mergeRule || unchangedRule ? 1 : 0);
           assert.strictEqual(thread.worktreePath, worktreePath);
