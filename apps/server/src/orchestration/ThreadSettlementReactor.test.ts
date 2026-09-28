@@ -61,6 +61,7 @@ import { ServerConfig } from "../config.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
+import { WorktreeTeardown } from "../project/WorktreeTeardown.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { ThreadDeletionReactor } from "./Services/ThreadDeletionReactor.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
@@ -1593,9 +1594,10 @@ describe("storage cleanup", () => {
     "files-disabled",
     "files-extended",
     "archived",
-    "archived-unowned",
-    "archived-other-owner",
+    "archived-detached",
+    "archived-unreferenced",
     "archived-shared",
+    "archived-shared-active",
     "archived-dirty",
     "archived-ignored",
     "archived-project-root",
@@ -1606,6 +1608,7 @@ describe("storage cleanup", () => {
     "archived-event",
     "archived-session-stopped",
     "archived-terminal-closed",
+    "archived-teardown-failed",
   ] as const) {
     it.effect(
       `retains protected worktrees (${protection}) and expires only old artifacts and rotated logs`,
@@ -1685,6 +1688,7 @@ describe("storage cleanup", () => {
           const deleteRule = protection.startsWith("deleted");
           let tombstoned = deleteRule && protection !== "deleted-event";
           const removals: string[] = [];
+          const teardowns: string[] = [];
           const mergeRule = protection === "merged" || protection === "unmerged";
           const unchangedRule =
             protection === "unchanged" ||
@@ -1811,6 +1815,12 @@ describe("storage cleanup", () => {
                           const threads = tombstoned || thread.archivedAt !== null ? [] : [thread];
                           if (protection === "deleted-shared")
                             threads.push({ ...thread, id: ThreadId.make("surviving-thread") });
+                          if (protection === "archived-shared-active")
+                            threads.push({
+                              ...thread,
+                              id: ThreadId.make("active-sharing-thread"),
+                              archivedAt: null,
+                            });
                           if (protection === "deleted-project")
                             projects.push(makeProject(LINKED_PROJECT_ID, worktreePath));
                           if (
@@ -1903,14 +1913,6 @@ describe("storage cleanup", () => {
                     ),
                 }),
                 Layer.mock(GitVcsDriver)({
-                  getWorktreeOwner: () =>
-                    Effect.succeed(
-                      protection === "archived-other-owner"
-                        ? ThreadId.make("another-thread")
-                        : archiveRule && protection !== "archived-unowned"
-                          ? thread.id
-                          : null,
-                    ),
                   resolvePrimaryRemoteName: () => Effect.succeed("origin"),
                   resolveDefaultBranchName: () => Effect.succeed("main"),
                   fetchRemoteTrackingBranch: (input) =>
@@ -1940,7 +1942,13 @@ describe("storage cleanup", () => {
                       isRepo: true,
                       hasOriginRemote: false,
                       isDefaultBranch: false,
-                      branch: cwd === secondWorktreePath ? "feature-two" : "feature",
+                      branch:
+                        cwd === secondWorktreePath
+                          ? "feature-two"
+                          : protection === "archived-detached" ||
+                              protection === "archived-unreferenced"
+                            ? null
+                            : "feature",
                       upstreamRef: null,
                       hasWorkingTreeChanges:
                         protection === "dirty" ||
@@ -1961,13 +1969,17 @@ describe("storage cleanup", () => {
                           : 0,
                       ),
                       stdout:
-                        protection === "ignored" ||
-                        protection === "deleted-ignored" ||
-                        protection === "archived-ignored"
-                          ? ".env\0"
-                          : protection === "ignored-directory"
-                            ? ".cache/\0"
-                            : "",
+                        input.operation === "StorageCleanup.referencedHead"
+                          ? protection === "archived-unreferenced"
+                            ? ""
+                            : "refs/remotes/origin/main\n"
+                          : protection === "ignored" ||
+                              protection === "deleted-ignored" ||
+                              protection === "archived-ignored"
+                            ? ".env\0"
+                            : protection === "ignored-directory"
+                              ? ".cache/\0"
+                              : "",
                       stderr: "",
                       stdoutTruncated: false,
                       stderrTruncated: false,
@@ -2003,6 +2015,14 @@ describe("storage cleanup", () => {
                     removals.push(input.path);
                     return fs.remove(input.path, { recursive: true }).pipe(Effect.orDie);
                   },
+                }),
+                Layer.mock(WorktreeTeardown)({
+                  run: (input) =>
+                    Effect.sync(() => {
+                      assert.strictEqual(input.projectCwd, config.baseDir);
+                      teardowns.push(input.worktreePath);
+                      return protection !== "archived-teardown-failed";
+                    }),
                 }),
                 Layer.mock(TerminalManager)({
                   subscribeMetadata: (listener) => {
@@ -2126,6 +2146,9 @@ describe("storage cleanup", () => {
             protection === "unchanged" ||
             protection === "unchanged-two-worktrees" ||
             protection === "archived" ||
+            protection === "archived-detached" ||
+            protection === "archived-ignored" ||
+            protection === "archived-shared" ||
             protection === "archived-project-off" ||
             protection === "archived-event" ||
             protection === "archived-session-stopped" ||
@@ -2138,6 +2161,10 @@ describe("storage cleanup", () => {
               : removed
                 ? [worktreePath]
                 : [],
+          );
+          assert.deepStrictEqual(
+            teardowns,
+            protection === "archived-teardown-failed" ? [worktreePath] : removals,
           );
           assert.strictEqual(fetches, mergeRule || unchangedRule ? 1 : 0);
           assert.strictEqual(thread.worktreePath, worktreePath);

@@ -161,6 +161,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
+import * as WorktreeTeardown from "./project/WorktreeTeardown.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -953,6 +954,7 @@ const buildAppUnderTest = (options?: {
           Layer.mock(TerminalManager.TerminalManager)({
             ...options?.layers?.terminalManager,
           }),
+          Layer.mock(WorktreeTeardown.WorktreeTeardown)({ run: () => Effect.succeed(true) }),
           WorktreeSetupTracker.layer,
           ProjectCloneTracker.layer.pipe(
             Layer.provide(
@@ -11527,7 +11529,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           );
         }
         assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
-          threadId: ThreadId.make("thread-bootstrap"),
           cwd: "/tmp/project",
           refName: fetchedOriginCommit,
           newRefName: "t3code/bootstrap-refName",
@@ -11720,7 +11721,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }
       assert.equal(resolveRemoteTrackingCommit.mock.calls.length, 0);
       assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
-        threadId: ThreadId.make("thread-bootstrap-no-origin"),
         cwd: "/tmp/project",
         refName: "main",
         newRefName: "t3code/bootstrap-refName",

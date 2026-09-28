@@ -268,7 +268,6 @@ export function useSelectedThreadGitActions() {
           const result = await createWorktree({
             environmentId: thread.environmentId,
             input: {
-              threadId: thread.id,
               cwd: project.workspaceRoot,
               refName: nextWorktree.baseBranch,
               newRefName: sanitizeFeatureBranchName(nextWorktree.newBranch),

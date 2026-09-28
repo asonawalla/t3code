@@ -50,6 +50,11 @@ checkouts and removal. Actions belong to a project: editing them creates the pro
 on each selected environment, and reset returns to the environment's shared list. A project's
 `t3.json` actions can be imported there.
 
+An action can run automatically when a worktree is created, or before T3 Code removes one, for
+example to stop services the setup action started. The removal action runs without a terminal in
+your login shell; if it fails or runs past ten minutes, the worktree is kept and the failure is
+logged.
+
 Settings a repository can also declare in `t3.json`, such as the workspace for new threads,
 resolve in one order: a project override, then the environment setting, then `t3.json`, then the
 built-in default. Leave a setting on **Inherit** to let the next tier decide.
@@ -69,8 +74,8 @@ environments. Policies are off by default and run on the server at startup, when
 hourly. Offline machines keep their existing policies.
 
 Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
-Inherit follows each machine's rules; Off disables these retention rules. Archiving still
-removes eligible worktrees created for the archived thread. Custom applies separate worktree
+Inherit follows each machine's rules; Off disables these retention rules. Archiving a thread
+still removes its worktree. Custom applies separate worktree
 rules to the selected project or checkout. Browser captures and log retention remain machine-wide.
 
 Worktrees can be removed after a chosen number of inactive days, after merging, or when they

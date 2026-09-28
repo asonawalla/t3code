@@ -13,6 +13,7 @@ export interface ProjectScriptInput {
   readonly icon: ProjectScript["icon"];
   readonly runOnWorktreeCreate: ProjectScript["runOnWorktreeCreate"];
   readonly waitForSetup: boolean;
+  readonly runOnWorktreeRemove: boolean;
   readonly previewUrl: Exclude<ProjectScript["previewUrl"], undefined> | null;
   readonly autoOpenPreview: boolean;
 }
@@ -25,6 +26,7 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
     icon: input.icon,
     runOnWorktreeCreate: input.runOnWorktreeCreate,
     ...(input.runOnWorktreeCreate && input.waitForSetup ? { async: false } : {}),
+    ...(input.runOnWorktreeRemove ? { runOnWorktreeRemove: true } : {}),
     ...(input.previewUrl === null
       ? {}
       : {
@@ -32,6 +34,25 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
           autoOpenPreview: input.autoOpenPreview,
         }),
   };
+}
+
+/**
+ * A project has at most one setup and one teardown script. Saving `claimant`
+ * clears whichever of those roles it takes from `script`.
+ */
+export function releaseWorktreeScriptRoles(
+  script: ProjectScript,
+  claimant: Pick<ProjectScriptInput, "runOnWorktreeCreate" | "runOnWorktreeRemove">,
+): ProjectScript {
+  let next = script;
+  if (claimant.runOnWorktreeCreate && next.runOnWorktreeCreate) {
+    next = { ...next, runOnWorktreeCreate: false };
+  }
+  if (claimant.runOnWorktreeRemove && next.runOnWorktreeRemove !== undefined) {
+    const { runOnWorktreeRemove: _released, ...rest } = next;
+    next = rest;
+  }
+  return next;
 }
 
 function normalizeScriptId(value: string): string {
@@ -87,6 +108,8 @@ export function nextProjectScriptId(name: string, existingIds: Iterable<string>)
 }
 
 export function primaryProjectScript(scripts: ReadonlyArray<ProjectScript>): ProjectScript | null {
-  const regular = scripts.find((script) => !script.runOnWorktreeCreate);
+  const regular = scripts.find(
+    (script) => !script.runOnWorktreeCreate && script.runOnWorktreeRemove !== true,
+  );
   return regular ?? scripts[0] ?? null;
 }
