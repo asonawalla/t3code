@@ -11895,7 +11895,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           );
         }
         assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
-          threadId: ThreadId.make("thread-bootstrap"),
           cwd: "/tmp/project",
           refName: fetchedOriginCommit,
           newRefName: "t3code/bootstrap-refName",
@@ -12088,7 +12087,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }
       assert.equal(resolveRemoteTrackingCommit.mock.calls.length, 0);
       assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
-        threadId: ThreadId.make("thread-bootstrap-no-origin"),
         cwd: "/tmp/project",
         refName: "main",
         newRefName: "t3code/bootstrap-refName",

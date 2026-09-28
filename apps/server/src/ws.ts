@@ -1503,7 +1503,6 @@ const makeWsRpcLayer = (
               });
               const worktree = yield* gitWorkflow.createWorktree(
                 {
-                  threadId,
                   cwd: prepareWorktree.projectCwd,
                   refName: worktreeBaseRef,
                   newRefName: prepareWorktree.branch,

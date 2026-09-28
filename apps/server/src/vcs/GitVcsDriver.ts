@@ -31,7 +31,6 @@ import {
   type VcsStatusInput,
   type VcsStatusResult,
   type WorktreeSubmodules,
-  type ThreadId,
 } from "@t3tools/contracts";
 import {
   makeGitVcsDriverCore,
@@ -332,7 +331,6 @@ export class GitVcsDriver extends Context.Service<
       input: VcsCreateWorktreeInput,
       options?: CreateWorktreeOptions,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
-    readonly getWorktreeOwner: (cwd: string) => Effect.Effect<ThreadId | null, GitCommandError>;
     readonly fetchPullRequestBranch: (
       input: GitFetchPullRequestBranchInput,
     ) => Effect.Effect<void, GitCommandError>;

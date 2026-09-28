@@ -40,11 +40,9 @@ describe("VcsCreateWorktreeInput", () => {
       newRefName: "feature/new",
       baseRefName: "origin/main",
       path: "/tmp/worktree",
-      threadId: "owner-thread",
     });
 
     expect(parsed.baseRefName).toBe("origin/main");
-    expect(parsed.threadId).toBe("owner-thread");
   });
 });
 

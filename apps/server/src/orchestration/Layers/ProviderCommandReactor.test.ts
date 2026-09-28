@@ -35,6 +35,7 @@ import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -75,6 +76,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -189,6 +191,7 @@ describe("ProviderCommandReactor", () => {
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
     readonly tryHandlePromptCommandEffect?: ProviderAuthService["Service"]["tryHandlePromptCommand"];
+    readonly deletedWorktreeBranch?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -476,6 +479,20 @@ describe("ProviderCommandReactor", () => {
           pruneWorktrees,
           createWorktree,
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
+      ),
+      Layer.provideMerge(
+        Layer.mock(GitVcsDriver.GitVcsDriver)({
+          resolvePrimaryRemoteName: () => Effect.succeed("origin"),
+          resolveDefaultBranchName: () => Effect.succeed("main"),
+          execute: () =>
+            Effect.succeed({
+              exitCode: ChildProcessSpawner.ExitCode(0),
+              stdout: input?.deletedWorktreeBranch ? "" : "refs/heads/feature/restore\n",
+              stderr: "",
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            }),
+        }),
       ),
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
@@ -2699,53 +2716,60 @@ describe("ProviderCommandReactor", () => {
     ).toBe(prompt);
   });
 
-  it("recreates a missing worktree from the thread branch before starting a turn", async () => {
-    const harness = await createHarness();
-    const now = "2026-01-01T00:00:00.000Z";
-    const worktreePath = NodePath.join(harness.stateDir, "missing-worktree");
+  it.each([
+    {
+      deletedWorktreeBranch: false,
+      recreated: { refName: "feature/restore" },
+    },
+    {
+      deletedWorktreeBranch: true,
+      recreated: { refName: "origin/main", newRefName: "feature/restore" },
+    },
+  ])(
+    "recreates a missing worktree before starting a turn (deleted branch: $deletedWorktreeBranch)",
+    async ({ deletedWorktreeBranch, recreated }) => {
+      const harness = await createHarness({ deletedWorktreeBranch });
+      const now = "2026-01-01T00:00:00.000Z";
+      const worktreePath = NodePath.join(harness.stateDir, "missing-worktree");
 
-    await harness.runEffect(
-      harness.engine.dispatch({
-        type: "thread.meta.update",
-        commandId: CommandId.make("cmd-thread-missing-worktree"),
-        threadId: ThreadId.make("thread-1"),
-        branch: "feature/restore",
-        worktreePath,
-      }),
-    );
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-missing-worktree"),
+          threadId: ThreadId.make("thread-1"),
+          branch: "feature/restore",
+          worktreePath,
+        }),
+      );
 
-    await harness.runEffect(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-missing-worktree"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-missing-worktree"),
-          role: "user",
-          text: "continue",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-missing-worktree"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-missing-worktree"),
+            role: "user",
+            text: "continue",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
 
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-    expect(harness.pruneWorktrees).toHaveBeenCalledWith({ cwd: "/tmp/provider-project" });
-    expect(harness.createWorktree).toHaveBeenCalledWith(
-      {
-        cwd: "/tmp/provider-project",
-        refName: "feature/restore",
-        path: worktreePath,
-        threadId: ThreadId.make("thread-1"),
-      },
-      { submodules: null },
-    );
-    expect(harness.createWorktree.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.startSession.mock.invocationCallOrder[0]!,
-    );
-  });
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      expect(harness.pruneWorktrees).toHaveBeenCalledWith({ cwd: "/tmp/provider-project" });
+      expect(harness.createWorktree).toHaveBeenCalledWith(
+        { cwd: "/tmp/provider-project", ...recreated, path: worktreePath },
+        { submodules: null },
+      );
+      expect(harness.createWorktree.mock.invocationCallOrder[0]).toBeLessThan(
+        harness.startSession.mock.invocationCallOrder[0]!,
+      );
+    },
+  );
 
   it("forwards codex model options through session start and turn send", async () => {
     const harness = await createHarness();
