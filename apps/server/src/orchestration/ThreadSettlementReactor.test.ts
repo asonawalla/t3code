@@ -1593,9 +1593,10 @@ describe("storage cleanup", () => {
     "files-disabled",
     "files-extended",
     "archived",
-    "archived-unowned",
-    "archived-other-owner",
+    "archived-detached",
+    "archived-unreferenced",
     "archived-shared",
+    "archived-shared-active",
     "archived-dirty",
     "archived-ignored",
     "archived-project-root",
@@ -1811,6 +1812,12 @@ describe("storage cleanup", () => {
                           const threads = tombstoned || thread.archivedAt !== null ? [] : [thread];
                           if (protection === "deleted-shared")
                             threads.push({ ...thread, id: ThreadId.make("surviving-thread") });
+                          if (protection === "archived-shared-active")
+                            threads.push({
+                              ...thread,
+                              id: ThreadId.make("active-sharing-thread"),
+                              archivedAt: null,
+                            });
                           if (protection === "deleted-project")
                             projects.push(makeProject(LINKED_PROJECT_ID, worktreePath));
                           if (
@@ -1903,14 +1910,6 @@ describe("storage cleanup", () => {
                     ),
                 }),
                 Layer.mock(GitVcsDriver)({
-                  getWorktreeOwner: () =>
-                    Effect.succeed(
-                      protection === "archived-other-owner"
-                        ? ThreadId.make("another-thread")
-                        : archiveRule && protection !== "archived-unowned"
-                          ? thread.id
-                          : null,
-                    ),
                   resolvePrimaryRemoteName: () => Effect.succeed("origin"),
                   resolveDefaultBranchName: () => Effect.succeed("main"),
                   fetchRemoteTrackingBranch: (input) =>
@@ -1940,7 +1939,13 @@ describe("storage cleanup", () => {
                       isRepo: true,
                       hasOriginRemote: false,
                       isDefaultBranch: false,
-                      branch: cwd === secondWorktreePath ? "feature-two" : "feature",
+                      branch:
+                        cwd === secondWorktreePath
+                          ? "feature-two"
+                          : protection === "archived-detached" ||
+                              protection === "archived-unreferenced"
+                            ? null
+                            : "feature",
                       upstreamRef: null,
                       hasWorkingTreeChanges:
                         protection === "dirty" ||
@@ -1961,13 +1966,17 @@ describe("storage cleanup", () => {
                           : 0,
                       ),
                       stdout:
-                        protection === "ignored" ||
-                        protection === "deleted-ignored" ||
-                        protection === "archived-ignored"
-                          ? ".env\0"
-                          : protection === "ignored-directory"
-                            ? ".cache/\0"
-                            : "",
+                        input.operation === "StorageCleanup.referencedHead"
+                          ? protection === "archived-unreferenced"
+                            ? ""
+                            : "refs/remotes/origin/main\n"
+                          : protection === "ignored" ||
+                              protection === "deleted-ignored" ||
+                              protection === "archived-ignored"
+                            ? ".env\0"
+                            : protection === "ignored-directory"
+                              ? ".cache/\0"
+                              : "",
                       stderr: "",
                       stdoutTruncated: false,
                       stderrTruncated: false,
@@ -2126,6 +2135,9 @@ describe("storage cleanup", () => {
             protection === "unchanged" ||
             protection === "unchanged-two-worktrees" ||
             protection === "archived" ||
+            protection === "archived-detached" ||
+            protection === "archived-ignored" ||
+            protection === "archived-shared" ||
             protection === "archived-project-off" ||
             protection === "archived-event" ||
             protection === "archived-session-stopped" ||

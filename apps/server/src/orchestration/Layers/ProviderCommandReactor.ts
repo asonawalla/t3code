@@ -72,6 +72,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
+import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
@@ -227,6 +228,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
+  const git = yield* GitVcsDriver.GitVcsDriver;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -484,6 +486,7 @@ const make = Effect.gen(function* () {
    * Recreates a thread's worktree from its branch when the directory has
    * disappeared. Provider sessions resume into the persisted cwd, so a missing
    * worktree makes every later turn fail as a bogus "session not found".
+   * A branch deleted after merging starts again from the default branch.
    * Best-effort: on failure the turn proceeds and reports the real error.
    */
   const ensureThreadWorktree = Effect.fnUntraced(function* (thread: {
@@ -518,13 +521,27 @@ const make = Effect.gen(function* () {
       Effect.map((settings) => settings.worktreeSubmodules),
       Effect.orElseSucceed(() => null),
     );
+    const fromBranch = { cwd, refName: branch, path: worktreePath };
+    const input = yield* Effect.gen(function* () {
+      const remote = yield* git.resolvePrimaryRemoteName(cwd);
+      const refs = yield* git.execute({
+        operation: "ProviderCommandReactor.worktreeBranchExists",
+        cwd,
+        args: [
+          "for-each-ref",
+          "--count=1",
+          `refs/heads/${branch}`,
+          `refs/remotes/${remote}/${branch}`,
+        ],
+      });
+      if (refs.stdout.trim() !== "") return fromBranch;
+      const defaultBranch = yield* git.resolveDefaultBranchName(cwd, remote);
+      return defaultBranch === null
+        ? fromBranch
+        : { cwd, refName: `${remote}/${defaultBranch}`, newRefName: branch, path: worktreePath };
+    }).pipe(Effect.orElseSucceed(() => fromBranch));
     yield* gitWorkflow.pruneWorktrees({ cwd }).pipe(
-      Effect.andThen(
-        gitWorkflow.createWorktree(
-          { cwd, refName: branch, path: worktreePath, threadId: thread.id },
-          { submodules },
-        ),
-      ),
+      Effect.andThen(gitWorkflow.createWorktree(input, { submodules })),
       Effect.catchCauseIf(
         (cause) => !Cause.hasInterruptsOnly(cause),
         (cause) =>
