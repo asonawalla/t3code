@@ -566,6 +566,10 @@ export function foldSubagentActivities(
         ) {
           applyStatus(agent, "running", at);
         }
+        // The provider's start time beats when this row happened to arrive,
+        // and survives a reload where the first running row is gone.
+        const providerStartedAt = asString(payload.startedAt);
+        if (providerStartedAt) agent.startedAt = providerStartedAt;
         const summary = asString(payload.summary);
         if (summary) {
           agent.progress = bounded(summary);

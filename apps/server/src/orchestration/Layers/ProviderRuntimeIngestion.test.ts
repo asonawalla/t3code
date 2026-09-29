@@ -4680,6 +4680,46 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activity?.payload).toMatchObject({ requestId: "message-compact" });
   });
 
+  it("keeps a workflow member's provider start time and current activity", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:40.000Z";
+
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-workflow-member-progress"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-1"),
+      payload: {
+        taskId: "wf-1:wf:0",
+        description: "survey:auth.ts",
+        title: "survey:auth.ts",
+        status: "running",
+        summary: "sleep 25",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        parentAgentId: "wf-1",
+        agentIndex: 0,
+        timelineBypass: true,
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "task-progress:thread-1:wf-1:wf:0",
+      ),
+    );
+    const progress = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "task-progress:thread-1:wf-1:wf:0",
+    );
+    expect(progress?.payload).toMatchObject({
+      status: "running",
+      summary: "sleep 25",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    });
+  });
+
   it("projects Codex task lifecycle chunks into thread activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
