@@ -251,6 +251,7 @@ import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../times
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
 import { deriveAgentSpawnSummary } from "./agentSpawnSummary";
+import { WorkflowRunCard } from "../AgentsPanel";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import {
   buildReviewCommentRenderablePatch,
@@ -295,7 +296,8 @@ interface TimelineRowSharedState {
   workGroupViewState: WorkGroupViewState;
   agentPanelModel: AgentPanelModel;
   expandedSpawnEntryIds: ReadonlySet<string>;
-  onOpenAgents: () => void;
+  /** Opens the Agents panel, led by the given workflow run when there is one. */
+  onOpenAgents: (workflowId?: string) => void;
   onCancelWorktreeSetup: (() => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
@@ -403,7 +405,7 @@ interface MessagesTimelineProps {
     sourceAnchor: AssistantCitationSourceAnchor,
   ) => boolean;
   agentPanelModel?: AgentPanelModel;
-  onOpenAgents?: () => void;
+  onOpenAgents?: (workflowId?: string) => void;
   isWorking: boolean;
   isPreparingWorktree?: boolean;
   isCompacting?: boolean;
@@ -4522,22 +4524,24 @@ const AgentSpawnRow = memo(function AgentSpawnRow(props: {
   const workflowGroup = spawn.workflowId
     ? agentPanelModel.workflows.find((group) => group.workflow.id === spawn.workflowId)
     : undefined;
-  const agents = workflowGroup
-    ? [...workflowGroup.phases.flatMap((phase) => phase.members), ...workflowGroup.unphasedMembers]
-    : agentPanelModel.directAgents.filter((agent) => memberIds.has(agent.id));
+  // Workflow runs get the run card; the Agents panel holds their detail.
+  if (workflowGroup) {
+    return (
+      <WorkflowRunCard
+        group={workflowGroup}
+        onOpen={() => onOpenAgents(workflowGroup.workflow.id)}
+      />
+    );
+  }
+  // Direct spawns, and members whose coordinator aged out of the roster.
+  const agents = agentPanelModel.directAgents.filter((agent) => memberIds.has(agent.id));
   const agentCount = Math.max(
     agents.length,
     Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0),
   );
-  const summary = deriveAgentSpawnSummary({
-    agents,
-    agentCount,
-    coordinatorStatus: workflowGroup?.workflow.status,
-  });
+  const summary = deriveAgentSpawnSummary({ agents, agentCount });
   const { live, lead } = summary;
   const failed = summary.tone === "failed";
-  const workflowName =
-    workflowGroup?.workflow.workflowName ?? workflowGroup?.workflow.title ?? null;
   const toggleExpanded = () => {
     props.onToggleEntry?.(expanded);
     onToggleSpawnRow(workEntry.id, !expanded);
@@ -4552,7 +4556,7 @@ const AgentSpawnRow = memo(function AgentSpawnRow(props: {
         className="flex cursor-pointer select-none rounded-md text-left transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
         <LiveActivityRow
-          label={workflowName ? `${lead} · ${workflowName}` : lead}
+          label={lead}
           iconName="bot"
           active={live && props.active !== false}
           failed={failed}
@@ -4565,7 +4569,7 @@ const AgentSpawnRow = memo(function AgentSpawnRow(props: {
           ))}
           <button
             type="button"
-            onClick={onOpenAgents}
+            onClick={() => onOpenAgents()}
             className="mt-1 self-start rounded-sm px-1 text-xs text-muted-foreground hover:text-foreground"
           >
             Open Agents panel ›
