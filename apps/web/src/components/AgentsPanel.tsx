@@ -274,13 +274,17 @@ function MemberLabel({
   label,
   prefix,
   attempt,
+  doing,
 }: {
   label: string;
   prefix: string | null;
   attempt: number;
+  /** What a running agent is doing now; takes the context slot while it runs. */
+  doing: string | null;
 }) {
   const parts = splitMemberLabel(label, prefix);
   const tail = memberLabelTail(parts.name);
+  const secondary = doing ?? parts.context;
   return (
     <span className="flex h-4 min-w-0 flex-1 flex-wrap items-baseline gap-x-1.5 overflow-hidden">
       <span className="flex max-w-full flex-none items-baseline overflow-hidden text-foreground/90">
@@ -300,9 +304,9 @@ function MemberLabel({
           </span>
         ) : null}
       </span>
-      {parts.context !== null ? (
+      {secondary !== null ? (
         <span className="hidden min-w-20 flex-1 basis-0 truncate text-2xs text-muted-foreground/60 @min-[25rem]:block">
-          {parts.context}
+          {secondary}
         </span>
       ) : null}
     </span>
@@ -372,7 +376,12 @@ function MemberRow({
         className="flex h-6 w-full items-center gap-2 rounded-sm pl-1.5 text-left text-xs hover:bg-accent/40"
       >
         <StateDot state={state} />
-        <MemberLabel label={member.title} prefix={prefix} attempt={attempt} />
+        <MemberLabel
+          label={member.title}
+          prefix={prefix}
+          attempt={attempt}
+          doing={state === "running" ? member.progress : null}
+        />
         <Columns
           activity={
             activityText ? (

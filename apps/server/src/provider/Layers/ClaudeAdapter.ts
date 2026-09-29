@@ -1387,10 +1387,24 @@ interface ClaudeWorkflowAgentEntry {
   readonly model: string | undefined;
   readonly attempt: number | undefined;
   readonly lastToolName: string | undefined;
+  /** What the agent is doing now, e.g. the command it is running. */
+  readonly lastToolSummary: string | undefined;
+  /** ISO start of the current attempt (the wire sends epoch milliseconds). */
   readonly startedAt: string | undefined;
+  /** Head of a finished agent's result. */
+  readonly resultPreview: string | undefined;
   readonly error: string | undefined;
   readonly tokens: number | undefined;
   readonly toolCalls: number | undefined;
+  /** Set once the agent settles. */
+  readonly durationMs: number | undefined;
+}
+
+/** workflow_progress timestamps are epoch milliseconds. */
+function workflowTimestamp(value: unknown): string | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? DateTime.formatIso(DateTime.makeUnsafe(value))
+    : undefined;
 }
 
 interface ClaudeWorkflowProgress {
@@ -1442,10 +1456,13 @@ function parseWorkflowProgress(value: unknown): ClaudeWorkflowProgress | undefin
       model: trimmedString(record.model),
       attempt: nonNegativeInt(record.attempt),
       lastToolName: trimmedString(record.lastToolName),
-      startedAt: trimmedString(record.startedAt),
+      lastToolSummary: trimmedString(record.lastToolSummary),
+      startedAt: workflowTimestamp(record.startedAt),
+      resultPreview: trimmedString(record.resultPreview),
       error: trimmedString(record.error),
       tokens: nonNegativeInt(record.tokens),
       toolCalls: nonNegativeInt(record.toolCalls),
+      durationMs: nonNegativeInt(record.durationMs),
     });
   }
   if (phasesByIndex.size === 0 && agentsByIndex.size === 0) {
@@ -3514,18 +3531,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     for (const entry of progress.agents) {
       const memberTaskId = `${coordinatorId}:wf:${entry.index}`;
       const status = workflowAgentStatus(entry);
+      // A finished agent's line is its result; otherwise it is what it is doing now.
+      const summary = status === "completed" ? entry.resultPreview : entry.lastToolSummary;
       // Material-transition filter: the wire repeats every member each tick.
       // Emit only when something the client renders actually changed, so a
       // 100-agent fleet costs ~1 event per changed member instead of 100
-      // per tick (review finding: unbounded event amplification).
+      // per tick (review finding: unbounded event amplification). The
+      // summary changes with each tool call, which already moves toolCalls.
       const fingerprint = [
         status,
         entry.label ?? "",
         entry.model ?? "",
         entry.lastToolName ?? "",
+        summary ?? "",
+        entry.startedAt ?? "",
         entry.error ?? "",
         entry.tokens ?? "",
         entry.toolCalls ?? "",
+        entry.durationMs ?? "",
         entry.phaseIndex ?? "",
         entry.phaseTitle ?? "",
         entry.attempt ?? "",
@@ -3548,11 +3571,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(entry.label ? { title: entry.label } : {}),
           ...(entry.model ? { model: entry.model } : {}),
           ...(entry.lastToolName ? { lastToolName: entry.lastToolName } : {}),
+          ...(summary ? { summary } : {}),
+          ...(entry.startedAt ? { startedAt: entry.startedAt } : {}),
           ...(entry.tokens !== undefined
             ? {
                 typedUsage: {
                   totalTokens: entry.tokens,
                   ...(entry.toolCalls !== undefined ? { toolUses: entry.toolCalls } : {}),
+                  ...(entry.durationMs !== undefined ? { durationMs: entry.durationMs } : {}),
                 },
               }
             : {}),

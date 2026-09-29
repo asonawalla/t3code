@@ -334,6 +334,33 @@ describe("member labels", () => {
   });
 });
 
+describe("provider start times", () => {
+  it("time a workflow member from when the provider says it started", () => {
+    const [member] = foldSubagentActivities([
+      {
+        id: "activity-start",
+        tone: "info",
+        kind: "task.progress",
+        summary: "task.progress",
+        payload: {
+          agentKind: "agent",
+          taskId: "wf:wf:1",
+          title: "survey:auth.ts",
+          parentAgentId: "wf",
+          status: "running",
+          summary: "sleep 25",
+          startedAt: "2026-09-29T00:10:00.000Z",
+        },
+        turnId: null,
+        // The row arrived (or survived a reload) well after the agent started.
+        createdAt: "2026-09-29T00:10:40.000Z",
+      } as unknown as OrchestrationThreadActivity,
+    ]);
+    expect(member?.startedAt).toBe("2026-09-29T00:10:00.000Z");
+    expect(member?.progress).toBe("sleep 25");
+  });
+});
+
 describe("run duration", () => {
   it("prefers the provider-reported duration once a run settles", () => {
     // The client first saw this run one second before it ended (older
