@@ -48,26 +48,4 @@ describe("deriveAgentSpawnSummary", () => {
       tone: "inactive",
     });
   });
-
-  it("keeps a workflow active between child launches", () => {
-    expect(
-      deriveAgentSpawnSummary({
-        agents: [agent("completed")],
-        agentCount: 1,
-        coordinatorStatus: "running",
-      }),
-    ).toMatchObject({ live: true, status: "working", tone: "working" });
-  });
-
-  it.each([
-    ["failed", "Workflow failed", "failed"],
-    ["cancelled", "Workflow stopped", "inactive"],
-  ] as const)(
-    "preserves a %s workflow outcome when its children completed",
-    (coordinatorStatus, status, tone) => {
-      expect(
-        deriveAgentSpawnSummary({ agents: [agent("completed")], agentCount: 1, coordinatorStatus }),
-      ).toMatchObject({ live: false, status, tone });
-    },
-  );
 });

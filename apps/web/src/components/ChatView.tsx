@@ -4554,10 +4554,25 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
-  const addAgentsSurface = useCallback(() => {
-    if (!activeThreadRef) return;
-    useRightPanelStore.getState().open(activeThreadRef, "agents");
-  }, [activeThreadRef]);
+  // The workflow run whose chat card opened the Agents panel leads it; any
+  // other way of opening the panel clears the pin.
+  const [agentsFocusPin, setAgentsFocusPin] = useState<{
+    threadId: string;
+    workflowId: string;
+  } | null>(null);
+  const openAgentsSurface = useCallback(
+    (workflowId?: string) => {
+      if (!activeThreadRef) return;
+      setAgentsFocusPin(workflowId ? { threadId: activeThreadRef.threadId, workflowId } : null);
+      useRightPanelStore.getState().open(activeThreadRef, "agents");
+    },
+    [activeThreadRef],
+  );
+  const addAgentsSurface = useCallback(() => openAgentsSurface(), [openAgentsSurface]);
+  const agentsFocusRunId =
+    agentsFocusPin !== null && agentsFocusPin.threadId === activeThreadRef?.threadId
+      ? agentsFocusPin.workflowId
+      : null;
   const supportsThreadPullRequests =
     serverConfig?.environment.capabilities.threadPullRequests === true;
   const visiblePullRequests = visibleThreadPullRequests(
@@ -9622,6 +9637,7 @@ export default function ChatView(props: ChatViewProps) {
         model={agentPanelModel}
         environmentId={activeThreadRef?.environmentId ?? null}
         threadId={activeThreadRef?.threadId ?? null}
+        focusRunId={agentsFocusRunId}
       />
     ) : renderedRightPanelSurface?.kind === "device" ? (
       <Suspense fallback={null}>
@@ -9819,7 +9835,7 @@ export default function ChatView(props: ChatViewProps) {
                   ? {
                       onCiteAssistantText: citeAssistantText,
                       agentPanelModel,
-                      onOpenAgents: addAgentsSurface,
+                      onOpenAgents: openAgentsSurface,
                       onUseArtifactTemplate: useArtifactTemplate,
                       ...(activeProject ? { onRunShellCommand: runShellCommand } : {}),
                     }

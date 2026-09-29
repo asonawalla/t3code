@@ -104,6 +104,49 @@ export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
   return status === "pending" || status === "running" || status === "waiting";
 }
 
+/**
+ * What an agent row honestly shows, from its status plus its workflow's.
+ * Running workflow members often arrive as pending, and a queued member
+ * looks like a running one; the fold also cascades a stopped run onto
+ * members that never started. Pass the coordinator for workflow members;
+ * direct subagents have none.
+ */
+export type SubagentDisplayState =
+  | "running"
+  | "waiting"
+  | "queued"
+  | "idle"
+  | "done"
+  | "failed"
+  | "stopped"
+  | "notRun";
+
+export function subagentDisplayState(
+  agent: RuntimeSubagent,
+  coordinator: RuntimeSubagent | null,
+): SubagentDisplayState {
+  const began = (agent.usage?.totalTokens ?? 0) > 0 || agent.startedAt !== null;
+  const runOver = coordinator !== null && isTerminalSubagentStatus(coordinator.status);
+  switch (agent.status) {
+    case "completed":
+      return "done";
+    case "failed":
+      return "failed";
+    case "cancelled":
+    case "interrupted":
+      // A member stopped by its run's end that never began was still queued.
+      return runOver && !began ? "notRun" : "stopped";
+    case "idle":
+      return "idle";
+    default:
+      break;
+  }
+  if (runOver) return began ? "stopped" : "notRun";
+  if (agent.status === "waiting") return "waiting";
+  if (agent.status === "running") return "running";
+  return began ? "running" : "queued";
+}
+
 const RECENT_ACTIVITY_LIMIT = 6;
 const SUMMARY_CHAR_LIMIT = 180;
 const ROSTER_LIMIT = 100;
