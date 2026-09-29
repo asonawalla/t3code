@@ -750,6 +750,7 @@ export function runtimeEventToActivities(
                     : {}),
                   ...(event.payload.status ? { status: event.payload.status } : {}),
                   ...(event.payload.error ? { error: event.payload.error } : {}),
+                  ...(event.payload.startedAt ? { startedAt: event.payload.startedAt } : {}),
                   ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
                   ...identityLinkage,
                 },

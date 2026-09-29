@@ -3984,6 +3984,106 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "workflow members forward what they are doing, when they started, and what they returned",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        // member-0 once per tick it changed (3 ticks, the second identical) plus member-1 once.
+        const memberEventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "task.progress" &&
+              (event.payload as { taskId?: string }).taskId?.includes(":wf:") === true,
+          ),
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "run workflow",
+          attachments: [],
+        });
+
+        const startedAtMs = 1_790_641_042_365;
+        const snapshot = (doing: string) => [
+          { type: "workflow_phase", index: 0, title: "Survey" },
+          {
+            type: "workflow_agent",
+            index: 0,
+            state: "progress",
+            label: "survey:auth.ts",
+            phaseIndex: 0,
+            startedAt: startedAtMs,
+            lastToolName: "Bash",
+            lastToolSummary: doing,
+            tokens: 1_200,
+            toolCalls: 3,
+          },
+          {
+            type: "workflow_agent",
+            index: 1,
+            state: "done",
+            label: "survey:billing.ts",
+            phaseIndex: 0,
+            startedAt: startedAtMs,
+            lastToolName: "StructuredOutput",
+            lastToolSummary: "billing.ts sums quantity times price",
+            resultPreview: '{"summary":"billing.ts sums quantity times price per line."}',
+            tokens: 9_000,
+            toolCalls: 4,
+            durationMs: 25_000,
+          },
+        ];
+        const tick = (id: string, workflowProgress: ReturnType<typeof snapshot>) =>
+          harness.query.emit({
+            type: "system",
+            subtype: "task_progress",
+            task_id: "wf-activity",
+            description: "Repo tour",
+            usage: { total_tokens: 10_200, tool_uses: 7, duration_ms: 10 },
+            workflow_progress: workflowProgress,
+            uuid: id,
+            session_id: "sdk-session",
+          } as unknown as SDKMessage);
+
+        tick("wf-activity-1", snapshot("sleep 25"));
+        tick("wf-activity-2", snapshot("sleep 25"));
+        // Only the summary changes: still worth an event.
+        tick("wf-activity-3", snapshot("cat auth.ts"));
+
+        const [running, done, next] = Array.from(yield* Fiber.join(memberEventsFiber)).map(
+          (event) => event.payload as Record<string, unknown>,
+        );
+        assert.equal(running?.taskId, "wf-activity:wf:0");
+        // A numeric startedAt reads as running, not pending.
+        assert.equal(running?.status, "running");
+        assert.equal(running?.summary, "sleep 25");
+        assert.equal(running?.startedAt, "2026-09-29T00:17:22.365Z");
+
+        assert.equal(done?.taskId, "wf-activity:wf:1");
+        assert.equal(done?.status, "completed");
+        assert.equal(done?.summary, '{"summary":"billing.ts sums quantity times price per line."}');
+        assert.deepEqual(done?.typedUsage, { totalTokens: 9_000, toolUses: 4, durationMs: 25_000 });
+
+        assert.equal(next?.taskId, "wf-activity:wf:0");
+        assert.equal(next?.summary, "cat auth.ts");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("task.started carries model/effort; subagent snapshots refine the model", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

@@ -649,6 +649,8 @@ const TaskProgressPayload = Schema.Struct({
   /** Present on synthesized member/child progress rows that carry state. */
   status: Schema.optional(RuntimeTaskStatus),
   error: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Provider-reported start of the current attempt, when the provider sends one. */
+  startedAt: Schema.optional(IsoDateTime),
   ...taskAgentLinkageFields,
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
