@@ -1,6 +1,7 @@
 import { useLayoutEffect, type PointerEvent as ReactPointerEvent } from "react";
 import { type SensorProps } from "@dnd-kit/core";
 import { getOwnerDocument, getWindow } from "@dnd-kit/utilities";
+import { isEditableFocused } from "../lib/editableFocus";
 
 // Search unmounts the drag context while its owning Sidebar remains mounted.
 export function SidebarDragLifecycle({ onUnmount }: { onUnmount: () => void }) {
@@ -20,8 +21,17 @@ export class SidebarPointerSensor {
   static activators = [
     {
       eventName: "onPointerDown" as const,
-      handler: ({ nativeEvent }: ReactPointerEvent) =>
-        nativeEvent.isPrimary && nativeEvent.button === 0,
+      handler: ({ nativeEvent }: ReactPointerEvent) => {
+        const { target } = nativeEvent;
+        // Row controls own their gestures, including presses on their nested icons.
+        if (
+          target instanceof Element &&
+          (target.closest("button, a") !== null || isEditableFocused(target))
+        ) {
+          return false;
+        }
+        return nativeEvent.isPrimary && nativeEvent.button === 0;
+      },
     },
   ];
   autoScrollEnabled = true;
