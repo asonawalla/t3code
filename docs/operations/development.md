@@ -131,7 +131,7 @@ Runtime-discovered entrypoints and dependency exceptions belong in [knip.jsonc](
 
 ## Desktop artifacts
 
-Local artifact builds are unsigned by default and write to `release/`:
+Local artifact builds are unsigned unless local signing is configured, and write to `release/`:
 
 ```sh
 vp run dist:desktop:dmg
@@ -195,6 +195,24 @@ passed as `--wsl-runtime`; see the
 [release runbook](./release.md#windows-payload-topology-and-update-validation).
 
 ### Signing and passkeys
+
+For a local macOS app, use an existing Apple Development certificate to give macOS a stable
+identity for Local Network access. List installed signing identities:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+Put the selected certificate's SHA-1 in the repository's ignored `.env.local`:
+
+```dotenv
+T3CODE_DESKTOP_LOCAL_SIGN_IDENTITY=<certificate-sha1>
+```
+
+Then use the usual `vp run dist:desktop:dmg` command. An environment variable with the same
+name overrides the file. This mode signs locally without notarization or provisioning; it does
+not enable provisioned passkeys. Keep the private key in the login keychain and do not commit
+certificates or `.env.local`. Removing the setting restores unsigned local builds.
 
 Add `--signed` after configuring the platform credentials in the
 [release runbook](./release.md). macOS passkeys need a signed, provisioned app; follow the
