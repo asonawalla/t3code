@@ -2684,11 +2684,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    const localSigningIdentity = signed
+      ? ""
+      : (loadRepoEnv({ repoRoot }).T3CODE_DESKTOP_LOCAL_SIGN_IDENTITY ?? "").trim();
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       extendInfo: {
+        NSLocalNetworkUsageDescription:
+          "T3 Code connects to development servers and devices on your local network.",
         NSScreenCaptureUsageDescription:
           "T3 Code captures the active window when you use the window capture shortcut.",
       },
@@ -2698,7 +2703,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           schemes: ["t3code", "t3code-dev"],
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      ...(signed || localSigningIdentity
+        ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") }
+        : {}),
+      ...(localSigningIdentity
+        ? {
+            // Force the signing hook to run without requiring release credentials.
+            // The hook selects the explicitly configured local certificate.
+            identity: "-",
+            type: "development",
+            notarize: false,
+          }
+        : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
