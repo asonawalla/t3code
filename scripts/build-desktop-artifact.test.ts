@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
+import * as PublicConfig from "./lib/public-config.ts";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { extractFile } from "@electron/asar";
@@ -103,6 +105,14 @@ const stagePackageExtensions = {
   "electron-webauthn": { peerDependenciesMeta: { typescript: { optional: true } } },
   "@electron-webauthn/macos": { peerDependenciesMeta: { typescript: { optional: true } } },
 };
+
+beforeEach(() => {
+  vi.spyOn(PublicConfig, "loadRepoEnv").mockReturnValue({});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 // A minimal stand-in for the Linux CLI release archive: one top-level
 // directory named after the archive stem holding the executable, the web
@@ -2145,6 +2155,55 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("opts local macOS builds into the signing hook without release provisioning", () =>
+    Effect.gen(function* () {
+      vi.mocked(PublicConfig.loadRepoEnv).mockReturnValue({
+        T3CODE_DESKTOP_LOCAL_SIGN_IDENTITY: "local-development-identity",
+      });
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const mac = config.mac as Record<string, unknown>;
+      assert.equal(mac.identity, "-");
+      assert.equal(mac.type, "development");
+      assert.equal(mac.notarize, false);
+      assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+      assert.notProperty(mac, "provisioningProfile");
+      assert.notProperty(mac, "entitlements");
+      assert.isString((mac.extendInfo as Record<string, unknown>).NSLocalNetworkUsageDescription);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("keeps local macOS signing opt-in and preserves release signing", () =>
+    Effect.gen(function* () {
+      for (const signed of [false, true]) {
+        vi.mocked(PublicConfig.loadRepoEnv).mockReturnValue({
+          T3CODE_DESKTOP_LOCAL_SIGN_IDENTITY: signed ? "local-development-identity" : "",
+        });
+        const config = yield* createBuildConfig(
+          "mac",
+          "dmg",
+          "1.2.3",
+          signed,
+          false,
+          undefined,
+          undefined,
+        );
+        const mac = config.mac as Record<string, unknown>;
+        assert.notProperty(mac, "identity");
+        assert.notProperty(mac, "type");
+        assert.notProperty(mac, "notarize");
+        if (!signed) assert.notProperty(mac, "sign");
+      }
+    }),
   );
 
   it.effect("uses the nightly DMG background for nightly macOS builds", () =>
