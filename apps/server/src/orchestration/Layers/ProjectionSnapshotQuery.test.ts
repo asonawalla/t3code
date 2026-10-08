@@ -100,45 +100,42 @@ it.effect("reads project shells without loading threads or resolving excluded pr
   }).pipe(Effect.provide(layer));
 });
 
-const projectionSnapshotLayer = it.layer(
-  OrchestrationProjectionSnapshotQueryLive.pipe(
-    Layer.provide(ThreadBackgroundLiveness.layer),
-    Layer.provide(ThreadPlanProgress.layer),
-    Layer.provideMerge(RepositoryIdentityResolver.layer),
-    Layer.provideMerge(SqlitePersistenceMemory),
-    Layer.provideMerge(NodeServices.layer),
-  ),
+const projectionSnapshotTestLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+  Layer.provide(ThreadBackgroundLiveness.layer),
+  Layer.provide(ThreadPlanProgress.layer),
+  Layer.provideMerge(RepositoryIdentityResolver.layer),
+  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(NodeServices.layer),
+);
+const projectionSnapshotLayer = it.layer(projectionSnapshotTestLayer);
+
+it.effect(
+  "includes archived thread shells only when requested and always excludes deleted ones",
+  () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("archived-shell-thread");
+      const archivedAt = "2026-09-09T00:00:00Z";
+      yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('archived-shell-project', 'Project', '/repo', '[]', ${archivedAt}, ${archivedAt})`;
+      yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at, archived_at)
+        VALUES (${threadId}, 'archived-shell-project', 'Thread', '{"provider":"codex","model":"gpt-5"}', 'full-access', 'default', ${archivedAt}, ${archivedAt}, ${archivedAt})`;
+
+      assert.isTrue(Option.isNone(yield* snapshotQuery.getThreadShellById(threadId)));
+      const thread = Option.getOrThrow(
+        yield* snapshotQuery.getThreadShellById(threadId, { includeArchived: true }),
+      );
+      assert.equal(thread.archivedAt, archivedAt);
+
+      yield* sql`UPDATE projection_threads SET deleted_at = ${archivedAt} WHERE thread_id = ${threadId}`;
+      assert.isTrue(
+        Option.isNone(yield* snapshotQuery.getThreadShellById(threadId, { includeArchived: true })),
+      );
+    }).pipe(Effect.provide(projectionSnapshotTestLayer)),
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
-  it.effect(
-    "includes archived thread shells only when requested and always excludes deleted ones",
-    () =>
-      Effect.gen(function* () {
-        const snapshotQuery = yield* ProjectionSnapshotQuery;
-        const sql = yield* SqlClient.SqlClient;
-        const threadId = ThreadId.make("archived-shell-thread");
-        const archivedAt = "2026-09-09T00:00:00Z";
-        yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
-        VALUES ('archived-shell-project', 'Project', '/repo', '[]', ${archivedAt}, ${archivedAt})`;
-        yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at, archived_at)
-        VALUES (${threadId}, 'archived-shell-project', 'Thread', '{"provider":"codex","model":"gpt-5"}', 'full-access', 'default', ${archivedAt}, ${archivedAt}, ${archivedAt})`;
-
-        assert.isTrue(Option.isNone(yield* snapshotQuery.getThreadShellById(threadId)));
-        const thread = Option.getOrThrow(
-          yield* snapshotQuery.getThreadShellById(threadId, { includeArchived: true }),
-        );
-        assert.equal(thread.archivedAt, archivedAt);
-
-        yield* sql`UPDATE projection_threads SET deleted_at = ${archivedAt} WHERE thread_id = ${threadId}`;
-        assert.isTrue(
-          Option.isNone(
-            yield* snapshotQuery.getThreadShellById(threadId, { includeArchived: true }),
-          ),
-        );
-      }),
-  );
-
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
