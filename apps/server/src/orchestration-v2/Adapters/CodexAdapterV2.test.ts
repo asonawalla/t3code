@@ -562,7 +562,8 @@ describe("CodexAdapterV2 runtime policy", () => {
         params.collaborationMode?.settings.developer_instructions ?? "",
         "request_user_input",
       );
-      assert.include(params.additionalContext?.t3_code_tools?.value ?? "", "preview_status");
+      assert.include(params.additionalContext?.t3_code_orchestration?.value ?? "", "delegate_task");
+      assert.notInclude(JSON.stringify(params.additionalContext ?? {}), "preview_status");
     }),
   );
 
