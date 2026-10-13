@@ -253,6 +253,7 @@ describe("buildTurnStartParams", () => {
         prompt: "Implement it",
         model: "gpt-5.3-codex",
         interactionMode: "default",
+        deviceToolsAvailable: true,
         attachments: [
           {
             type: "localImage",
@@ -288,10 +289,13 @@ describe("buildTurnStartParams", () => {
           developer_instructions: buildCodexDeveloperInstructions("default"),
         },
       },
-      additionalContext: buildCodexAdditionalContext({
-        model: "gpt-5.3-codex",
-        reasoningEffort: "medium",
-      }),
+      additionalContext: buildCodexAdditionalContext(
+        {
+          model: "gpt-5.3-codex",
+          reasoningEffort: "medium",
+        },
+        true,
+      ),
     });
   });
 
@@ -628,7 +632,7 @@ describe("buildCodexAdditionalContext", () => {
   });
 
   it("keeps every entry under Codex's 1,000 token cap per entry", () => {
-    const context = buildCodexAdditionalContext(runtime, { browser: true, device: true });
+    const context = buildCodexAdditionalContext(runtime, true);
     for (const entry of Object.values(context)) {
       // Codex estimates 4 bytes per token and truncates the middle of longer values.
       NodeAssert.ok(Buffer.byteLength(entry.value) < 4_000);
@@ -639,28 +643,24 @@ describe("buildCodexAdditionalContext", () => {
 describe("T3 tool instructions", () => {
   const runtime = { model: "gpt-5.3-codex", reasoningEffort: "high" };
 
-  it("prefers the product-native preview tools when they are attached", () => {
-    const tools = buildCodexAdditionalContext(runtime, true).t3_code_tools?.value ?? "";
-    NodeAssert.match(tools, /t3-code/);
-    NodeAssert.match(tools, /preview_status/);
-    NodeAssert.match(tools, /preview_open/);
-    NodeAssert.match(tools, /Do not switch to global browser skills/);
-    NodeAssert.doesNotMatch(tools, /device_open/);
+  it("omits injected browser policy by default", () => {
+    const context = buildCodexAdditionalContext(runtime);
+    NodeAssert.doesNotMatch(
+      JSON.stringify(context),
+      /preview_|Playwright|collaborative browser|Do not switch to global browser skills/,
+    );
   });
 
   it("describes device tools only when the credential grants them", () => {
-    const tools =
-      buildCodexAdditionalContext(runtime, { browser: false, device: true }).t3_code_tools?.value ??
-      "";
+    const tools = buildCodexAdditionalContext(runtime, true).t3_code_tools?.value ?? "";
     NodeAssert.match(tools, /device_open/);
-    NodeAssert.doesNotMatch(tools, /preview_open/);
+    NodeAssert.doesNotMatch(tools, /preview_|Playwright|Do not switch to global browser skills/);
   });
 
-  it("omits the tool entry entirely when no tools are attached", () => {
-    // Steering away from other browser automation must go with the tools;
-    // keeping it would leave the model talked out of its only option.
+  it("omits the tool entry entirely when device tools are unavailable", () => {
     const context = buildCodexAdditionalContext(runtime, false);
     NodeAssert.deepStrictEqual(Object.keys(context), ["t3_code_runtime"]);
+    NodeAssert.deepStrictEqual(context, buildCodexAdditionalContext(runtime));
   });
 });
 
