@@ -24,6 +24,7 @@ import {
   PullRequestOperationError,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
@@ -1308,6 +1309,89 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         settledProjection.turnItems.find((item) => item.id === settled.itemId)?.status,
         "cancelled",
       );
+
+      // Archiving also cancels the approval a detached provider would never answer.
+      const archived = yield* seedQuestion("runtime-archive-question");
+      const approvalId = RuntimeRequestId.make("runtime-archive-question-approval");
+      const approvalNodeId = NodeId.make("runtime-archive-question-approval-node");
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-archive-question-approval-seed"),
+        events: [
+          {
+            id: EventId.make("runtime-archive-question-approval-node-event"),
+            type: "node.updated",
+            threadId: archived.threadId,
+            nodeId: approvalNodeId,
+            occurredAt: now,
+            payload: {
+              id: approvalNodeId,
+              threadId: archived.threadId,
+              runId: null,
+              parentNodeId: null,
+              rootNodeId: approvalNodeId,
+              kind: "approval_request",
+              status: "waiting",
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: approvalId,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("runtime-archive-question-approval-event"),
+            type: "runtime-request.updated",
+            threadId: archived.threadId,
+            nodeId: approvalNodeId,
+            occurredAt: now,
+            payload: {
+              id: approvalId,
+              nodeId: approvalNodeId,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "command",
+              status: "pending",
+              responseCapability: {
+                type: "live",
+                providerSessionId: ProviderSessionId.make("runtime-archive-question-session"),
+              },
+              createdAt: now,
+              resolvedAt: null,
+            },
+          },
+        ],
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("runtime-archive-question-command"),
+        threadId: archived.threadId,
+      });
+      const archivedProjection = yield* orchestrator.getThreadProjection(archived.threadId);
+      const question = archivedProjection.runtimeRequests.find(
+        (request) => request.id === archived.requestId,
+      );
+      assert.equal(question?.status, "resolved");
+      assert.equal(question?.decision, "cancel");
+      assert.equal(
+        archivedProjection.turnItems.find((item) => item.id === archived.itemId)?.status,
+        "cancelled",
+      );
+      const approval = archivedProjection.runtimeRequests.find(
+        (request) => request.id === approvalId,
+      );
+      assert.equal(approval?.status, "cancelled");
+      assert.deepEqual(approval?.responseCapability, {
+        type: "not_resumable",
+        reason: "The thread was archived.",
+      });
+      const archivedShell = (yield* orchestrator.getShellSnapshot({
+        location: "archive",
+      })).archivedThreads.find((thread) => thread.id === archived.threadId);
+      assert.isNull(archivedShell?.pendingRuntimeRequest);
     }),
   );
 

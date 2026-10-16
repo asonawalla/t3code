@@ -3357,10 +3357,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (command.type === "thread.archive") {
       const projection = yield* loadProjectionForCommand(
         command,
-        ["runs", "attempts", "nodes", "subagents", "messages"],
+        ["runs", "attempts", "nodes", "subagents", "messages", "runtimeRequests"],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
       const emitEvent = emit(events, command);
+      // Nothing answers a request once the sessions below detach, so it would
+      // stay pending for good. Questions answered by a message are dismissed as
+      // on settle; requests a provider waits on are cancelled as on delete.
+      for (const request of projection.runtimeRequests) {
+        if (request.status !== "pending") continue;
+        if (request.responseCapability.type === "message") {
+          yield* dispatchRuntimeRequestRespond(
+            {
+              type: "runtime-request.respond",
+              commandId: command.commandId,
+              threadId: command.threadId,
+              requestId: request.id,
+              decision: "cancel",
+            },
+            events,
+            effects,
+          );
+          continue;
+        }
+        yield* emitEvent({
+          type: "runtime-request.updated",
+          threadId: command.threadId,
+          nodeId: request.nodeId,
+          occurredAt: now,
+          payload: {
+            ...request,
+            status: "cancelled",
+            responseCapability: { type: "not_resumable", reason: "The thread was archived." },
+            resolvedAt: now,
+          },
+        });
+      }
       const activeRunIds = new Set(
         projection.runs.filter((run) => run.status === "queued").map((run) => run.id),
       );
