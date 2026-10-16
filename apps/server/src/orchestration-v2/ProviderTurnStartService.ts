@@ -476,13 +476,29 @@ export const layer: Layer.Layer<
               worktreePath,
               branch,
             });
-            yield* gitWorkflow.pruneWorktrees({ cwd: project.workspaceRoot }).pipe(
-              Effect.andThen(
-                gitWorkflow.createWorktree({
-                  cwd: project.workspaceRoot,
-                  refName: branch,
-                  path: worktreePath,
-                }),
+            const cwd = project.workspaceRoot;
+            // A branch deleted after merging starts again from the default
+            // branch, which origin/HEAD names.
+            yield* gitWorkflow.hasRefNamed({ cwd, refName: branch }).pipe(
+              Effect.flatMap((exists) =>
+                exists
+                  ? Effect.succeed(null)
+                  : gitWorkflow
+                      .resolveRemoteTrackingCommit({
+                        cwd,
+                        refName: "HEAD",
+                        fallbackRemoteName: "origin",
+                      })
+                      .pipe(Effect.map(({ commitSha }) => commitSha)),
+              ),
+              Effect.orElseSucceed(() => null),
+              Effect.tap(() => gitWorkflow.pruneWorktrees({ cwd })),
+              Effect.flatMap((defaultHead) =>
+                gitWorkflow.createWorktree(
+                  defaultHead === null
+                    ? { cwd, refName: branch, path: worktreePath }
+                    : { cwd, refName: defaultHead, newRefName: branch, path: worktreePath },
+                ),
               ),
               Effect.catchCause((cause) =>
                 Cause.hasInterruptsOnly(cause)

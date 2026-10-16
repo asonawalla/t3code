@@ -327,7 +327,7 @@ const restartCancelledWorkSurvivesStaleRunUpdate = Effect.gen(function* () {
   assert.deepEqual(updated?.restartCancelledBackgroundWork, work);
 });
 
-const threadWorktreePathsReadActiveThreads = Effect.gen(function* () {
+const threadWorktreePathsMarkArchivedThreads = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
   const create = (id: string, input: { worktreePath: string | null; archived?: boolean }) => {
@@ -377,9 +377,22 @@ const threadWorktreePathsReadActiveThreads = Effect.gen(function* () {
     payload: { ...deleted, deletedAt: now },
   });
 
-  assert.deepEqual(yield* store.getThreadWorktreePaths(), [
-    { threadId: ThreadId.make("thread:active"), worktreePath: "/worktrees/active" },
-  ]);
+  const paths = yield* store.getThreadWorktreePaths();
+  assert.deepEqual(
+    paths.toSorted((left, right) => left.threadId.localeCompare(right.threadId)),
+    [
+      {
+        threadId: ThreadId.make("thread:active"),
+        worktreePath: "/worktrees/active",
+        archived: false,
+      },
+      {
+        threadId: ThreadId.make("thread:archived"),
+        worktreePath: "/worktrees/archived",
+        archived: true,
+      },
+    ],
+  );
 });
 
 const commandReadsSkipSettledLeafNodes = Effect.gen(function* () {
@@ -465,8 +478,8 @@ it.effect("memory command reads skip finished leaf nodes of finished runs", () =
   commandReadsSkipSettledLeafNodes.pipe(Effect.provide(ProjectionStore.layerMemory)),
 );
 
-it.effect("memory worktree path lookup reads only active threads", () =>
-  threadWorktreePathsReadActiveThreads.pipe(Effect.provide(ProjectionStore.layerMemory)),
+it.effect("memory worktree path lookup marks archived threads and skips deleted ones", () =>
+  threadWorktreePathsMarkArchivedThreads.pipe(Effect.provide(ProjectionStore.layerMemory)),
 );
 
 it.effect("memory projection keeps restart-cancelled work through a stale run.updated", () =>
@@ -696,8 +709,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     () => runlessNativeSubagentNeedsRecovery,
   );
   it.effect(
-    "worktree path lookup reads only active threads",
-    () => threadWorktreePathsReadActiveThreads,
+    "worktree path lookup marks archived threads and skips deleted ones",
+    () => threadWorktreePathsMarkArchivedThreads,
   );
 
   it.effect(

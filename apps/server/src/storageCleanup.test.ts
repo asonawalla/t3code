@@ -5,6 +5,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -44,6 +45,8 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ThreadShell,
+  type TerminalMetadataStreamEvent,
+  type TerminalSummary,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import {
@@ -115,6 +118,13 @@ describe("V2 storage cleanup eligibility", () => {
   it("allows an idle worktree and rejects the project checkout", () => {
     expect(storageCleanupThreadIdle(candidate(), NOW_MS)).toBe(true);
     expect(storageCleanupThreadIdle(shell(), NOW_MS)).toBe(false);
+  });
+
+  it("needs a branch only while the thread is active", () => {
+    expect(storageCleanupThreadIdle({ ...candidate(), branch: null }, NOW_MS)).toBe(false);
+    expect(
+      storageCleanupThreadIdle({ ...candidate(), branch: null, archivedAt: at(0) }, NOW_MS),
+    ).toBe(true);
   });
 
   it.each(["running", "starting", "preparing", "waiting", "queued"] as const)(
@@ -274,6 +284,8 @@ const cleanupFixture = (
     let teardownFails = false;
     const teardowns: Array<{ projectCwd: string; worktreePath: string; envFile: boolean }> = [];
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
+    let terminalListener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void> = () =>
+      Effect.void;
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -301,18 +313,34 @@ const cleanupFixture = (
         getShellSnapshot: (input?: { location?: string }) =>
           Effect.sync(() => {
             snapshotReads++;
-            return { threads: input?.location === "archive" ? [] : threads };
+            return {
+              threads:
+                input?.location === "archive"
+                  ? []
+                  : threads.filter((thread) => thread.archivedAt === null),
+            };
           }),
         getThreadWorktreePaths: () =>
           Effect.sync(() =>
             threads.flatMap((thread) =>
               thread.worktreePath === null
                 ? []
-                : [{ threadId: thread.id, worktreePath: thread.worktreePath }],
+                : [
+                    {
+                      threadId: thread.id,
+                      worktreePath: thread.worktreePath,
+                      archived: thread.archivedAt !== null,
+                    },
+                  ],
             ),
           ),
         getThreadShell: (threadId: ThreadId) =>
           Effect.sync(() => threads.find((thread) => thread.id === threadId) ?? null),
+        getThread: (threadId: ThreadId) =>
+          Effect.suspend(() => {
+            const thread = threads.find((candidate) => candidate.id === threadId);
+            return thread === undefined ? Effect.fail("missing thread") : Effect.succeed(thread);
+          }),
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
       Effect.provideService(ProviderSessionManager.ProviderSessionManagerV2, {
         isLive: () => Effect.sync(() => sessionLive),
@@ -345,7 +373,11 @@ const cleanupFixture = (
         invalidateStatus: () => Effect.void,
       } as unknown as GitManager.GitManager["Service"]),
       Effect.provideService(TerminalManager.TerminalManager, {
-        subscribeMetadata: () => Effect.succeed(() => {}),
+        subscribeMetadata: (listener: typeof terminalListener) =>
+          Effect.sync(() => {
+            terminalListener = listener;
+            return () => {};
+          }),
       } as unknown as TerminalManager.TerminalManager["Service"]),
       Effect.provideService(WorktreeTeardown.WorktreeTeardown, {
         run: (input: { projectCwd: string; worktreePath: string }) =>
@@ -415,6 +447,7 @@ const cleanupFixture = (
       failTeardown: () => {
         teardownFails = true;
       },
+      terminalEvent: (event: TerminalMetadataStreamEvent) => terminalListener(event),
       /** Starts the hourly sweep and the subscription to `domainEvents`, which wait until now. */
       activate: (domainEvents: Stream.Stream<OrchestrationV2DomainEvent>) => {
         events = domainEvents;
@@ -1137,3 +1170,229 @@ it.live.each(["thread.settled", "stopped", "ready"] as const)(
       }),
     ),
 );
+
+describe("archived thread worktrees", () => {
+  // Every rule off, and the strictest local-file policy: archiving ignores both.
+  const rulesOff: StorageCleanupSettings = {
+    ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+    worktreeKeepWhen: "any-local-files",
+  };
+  const archivedShell = (
+    worktreePath: string,
+    overrides: Partial<OrchestrationV2ThreadShell> = {},
+  ) =>
+    shell({ branch: "feature", worktreePath, archivedAt: at(0), settledAt: at(0), ...overrides });
+  const archivedFixture = Effect.gen(function* () {
+    const fixture = yield* cleanupFixture(rulesOff);
+    fixture.setThreads([archivedShell(fixture.worktree)]);
+    return fixture;
+  });
+  const terminal = (worktree: string, status: TerminalSummary["status"]): TerminalSummary => ({
+    threadId: "thread-1",
+    terminalId: "terminal-1",
+    cwd: worktree,
+    worktreePath: worktree,
+    status,
+    pid: status === "running" ? 123 : null,
+    exitCode: null,
+    exitSignal: null,
+    hasRunningSubprocess: false,
+    label: "shell",
+    updatedAt: "2026-06-10T12:00:00.000Z",
+  });
+  /** The first report after `report`, once `trigger` has run. */
+  const reportAfter = (
+    service: StorageCleanup.StorageCleanup["Service"],
+    report: StorageCleanupReport | null,
+    trigger: Effect.Effect<void>,
+  ) =>
+    service.reports.pipe(
+      Stream.tap((current) => (current === report ? trigger : Effect.void)),
+      Stream.filter(
+        (current): current is StorageCleanupReport => current !== null && current !== report,
+      ),
+      Stream.runHead,
+      Effect.map(Option.getOrThrow),
+    );
+
+  it.live("removes the checkout with every rule off, including ignored files", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree, repo, command } = yield* archivedFixture;
+        yield* fs.writeFileString(`${worktree}/.env`, "SECRET=1\n");
+        yield* fs.makeDirectory(`${worktree}/dist`);
+        yield* fs.writeFileString(`${worktree}/dist/app.js`, "built\n");
+        const report = yield* service.runNow;
+        expect(report.entries).toMatchObject([
+          { outcome: "removed", reason: "Thread was archived", path: worktree },
+        ]);
+        expect(yield* fs.exists(worktree)).toBe(false);
+        // The branch stays, so unarchiving can recreate the checkout.
+        expect(
+          (yield* command(repo, ["rev-parse", "--verify", "refs/heads/feature"])).exitCode,
+        ).toBe(0);
+      }),
+    ),
+  );
+
+  it.live.each([
+    ["a remote branch contains it", true],
+    ["nothing contains it", false],
+  ] as const)("judges a detached HEAD by its commit when %s", ([, onRemote]) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree, repo, command } = yield* archivedFixture;
+        // An agent merged its work, then detached HEAD and deleted the branch.
+        yield* command(worktree, ["checkout", "--detach"]);
+        yield* fs.writeFileString(`${worktree}/merged.txt`, "merged\n");
+        yield* command(worktree, ["add", "merged.txt"]);
+        yield* command(worktree, ["commit", "-m", "merged work"]);
+        const head = (yield* command(worktree, ["rev-parse", "HEAD"])).stdout.trim();
+        if (onRemote) yield* command(repo, ["update-ref", "refs/remotes/origin/feature", head]);
+        yield* command(repo, ["branch", "-D", "feature"]);
+        const report = yield* service.runNow;
+        expect(report.entries[0]).toMatchObject(
+          onRemote
+            ? { outcome: "removed", reason: "Thread was archived" }
+            : { outcome: "kept", reason: "Has commits that no branch or tag contains" },
+        );
+        expect(yield* fs.exists(worktree)).toBe(!onRemote);
+      }),
+    ),
+  );
+
+  it.live.each(["tracked.txt", "notes.txt"])("keeps uncommitted changes to %s", (file) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree } = yield* archivedFixture;
+        yield* fs.writeFileString(`${worktree}/${file}`, "local work\n");
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Has uncommitted changes (1 file)",
+        });
+        expect(yield* fs.exists(worktree)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live(
+    "keeps a checkout an active thread shares, and removes one only archived threads share",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const { service, fs, worktree, setThreads } = yield* archivedFixture;
+          const second = { id: ThreadId.make("thread-2"), title: "Second" };
+          setThreads([
+            archivedShell(worktree),
+            shell({ ...second, branch: "feature", worktreePath: worktree }),
+          ]);
+          expect((yield* service.runNow).entries).toEqual([]);
+          expect(yield* fs.exists(worktree)).toBe(true);
+          setThreads([
+            archivedShell(worktree),
+            archivedShell(worktree, { ...second, status: "running" }),
+          ]);
+          expect((yield* service.runNow).entries[0]).toMatchObject({
+            outcome: "kept",
+            reason: "Thread is running or has pending work",
+          });
+          setThreads([archivedShell(worktree), archivedShell(worktree, second)]);
+          expect((yield* service.runNow).entries).toMatchObject([
+            { outcome: "removed", reason: "Thread was archived" },
+          ]);
+          expect(yield* fs.exists(worktree)).toBe(false);
+        }),
+      ),
+  );
+
+  it.live("keeps a checkout that was unarchived while it was measured", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* pausedMeasurementFixture(rulesOff);
+        const thread = archivedShell(fixture.worktree);
+        fixture.setThreads([thread]);
+        const run = yield* fixture.service.runNow.pipe(Effect.forkChild);
+        yield* Deferred.await(fixture.measuring);
+        fixture.setThreads([{ ...thread, archivedAt: null }]);
+        yield* Deferred.succeed(fixture.resume, undefined);
+        expect((yield* Fiber.join(run)).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Thread activity or shared worktree changed since check",
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("sweeps once the archived thread's terminal stops", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* archivedFixture;
+        yield* fixture.terminalEvent({
+          type: "upsert",
+          terminal: terminal(fixture.worktree, "running"),
+        });
+        // Activating runs the startup sweep, which the terminal holds off.
+        const kept = yield* reportAfter(fixture.service, null, fixture.activate(Stream.empty));
+        expect(kept.entries[0]).toMatchObject({ outcome: "kept", reason: "Open terminal" });
+        const removed = yield* reportAfter(
+          fixture.service,
+          kept,
+          fixture.terminalEvent({ type: "remove", threadId: "thread-1", terminalId: "terminal-1" }),
+        );
+        expect(removed.entries[0]).toMatchObject({ outcome: "removed" });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }),
+    ),
+  );
+
+  it.live.each(["thread.archived", "provider-session.updated"] as const)(
+    "sweeps after %s for an archived thread",
+    (trigger) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* archivedFixture;
+          const thread = archivedShell(fixture.worktree);
+          // Unarchived during the startup sweep, or holding a live session.
+          if (trigger === "thread.archived") fixture.setThreads([{ ...thread, archivedAt: null }]);
+          else fixture.setOpenSessionCwd(fixture.worktree);
+          const startup = yield* Deferred.make<void>();
+          const kept = yield* reportAfter(
+            fixture.service,
+            null,
+            fixture.activate(
+              Stream.fromEffect(Deferred.await(startup)).pipe(
+                Stream.map((): OrchestrationV2DomainEvent =>
+                  trigger === "thread.archived"
+                    ? {
+                        id: EventId.make("archived"),
+                        type: "thread.archived",
+                        threadId: thread.id,
+                        occurredAt: at(0),
+                        payload: { ...thread, lastVisitedAt: null },
+                      }
+                    : sessionUpdated(0, "stopped"),
+                ),
+              ),
+            ),
+          );
+          expect(kept.entries).toMatchObject(
+            trigger === "thread.archived"
+              ? []
+              : [{ outcome: "kept", reason: "Provider session is still open" }],
+          );
+          const removed = yield* reportAfter(
+            fixture.service,
+            kept,
+            Effect.gen(function* () {
+              fixture.setThreads([thread]);
+              fixture.setSessionLive(false);
+              yield* Deferred.succeed(startup, undefined);
+            }),
+          );
+          expect(removed.entries[0]).toMatchObject({ outcome: "removed" });
+          expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+        }),
+      ),
+  );
+});

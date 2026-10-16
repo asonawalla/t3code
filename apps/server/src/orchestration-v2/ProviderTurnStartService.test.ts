@@ -102,7 +102,11 @@ it("does not commit running state when inherited background routing cannot be re
         IdAllocator.layer,
         Path.layer,
         FileSystem.layerNoop({ exists: () => Effect.succeed(false) }),
-        Layer.mock(GitWorkflow.GitWorkflowService)({ pruneWorktrees, createWorktree }),
+        Layer.mock(GitWorkflow.GitWorkflowService)({
+          hasRefNamed: () => Effect.succeed(true),
+          pruneWorktrees,
+          createWorktree,
+        }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>
             Effect.succeed(
@@ -501,6 +505,7 @@ function makeLocalCommandHarness(input: {
       Effect.succeed({ cwd: thread.worktreePath ?? "/tmp/native-account-command" } as never),
   );
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
+  const hasRefNamed = vi.fn(() => Effect.succeed(true));
   const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(() =>
     Effect.succeed(projection),
   );
@@ -527,6 +532,9 @@ function makeLocalCommandHarness(input: {
           ? FileSystem.layerNoop({ exists: () => Effect.succeed(true) })
           : Layer.succeed(FileSystem.FileSystem, input.fileSystem),
         Layer.mock(GitWorkflow.GitWorkflowService)({
+          hasRefNamed,
+          resolveRemoteTrackingCommit: () =>
+            Effect.succeed({ commitSha: "default-head", remoteRefName: "origin/HEAD" }),
           pruneWorktrees: () => Effect.void,
           createWorktree,
         }),
@@ -571,6 +579,7 @@ function makeLocalCommandHarness(input: {
     },
     resolveRuntimePolicy,
     createWorktree,
+    hasRefNamed,
     open,
     writeIfRunCurrent,
     startRootRun,
@@ -675,6 +684,36 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
         }),
       );
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("recreates a checkout from the default branch once its branch is gone", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-start-" });
+    const worktreePath = path.join(workspaceRoot, "worktree");
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath,
+      fileSystem,
+      failReadsAfterRunning: true,
+    });
+    harness.hasRefNamed.mockImplementation(() => Effect.succeed(false));
+    harness.createWorktree.mockImplementation(() =>
+      fileSystem.makeDirectory(worktreePath).pipe(Effect.as({} as never), Effect.orDie),
+    );
+    yield* harness.start;
+    expect(harness.hasRefNamed).toHaveBeenCalledWith({
+      cwd: "/tmp/native-account-project",
+      refName: "feature/restore",
+    });
+    expect(harness.createWorktree).toHaveBeenCalledWith({
+      cwd: "/tmp/native-account-project",
+      refName: "default-head",
+      newRefName: "feature/restore",
+      path: worktreePath,
+    });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 effectIt.effect("reads only thread state before taking the startup lease", () =>

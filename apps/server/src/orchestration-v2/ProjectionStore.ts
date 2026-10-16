@@ -449,12 +449,16 @@ export interface ProjectionStoreV2Shape {
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
   /**
-   * Active (not deleted, not archived) threads that have a worktree path, the
-   * same threads as the shell snapshot's `threads`. Reads only the thread rows,
-   * so callers can check who uses a path without a shell snapshot.
+   * Threads that are not deleted and have a worktree path, active and archived.
+   * Reads only the thread rows, so callers can check who uses a path without a
+   * shell snapshot.
    */
   readonly getThreadWorktreePaths: () => Effect.Effect<
-    ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly worktreePath: string;
+      readonly archived: boolean;
+    }>,
     ProjectionStoreV2Error
   >;
   readonly getTurnStartContext: (
@@ -5755,17 +5759,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       }).pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
 
     const getThreadWorktreePaths: ProjectionStoreV2Shape["getThreadWorktreePaths"] = () =>
-      sql<{ readonly thread_id: string; readonly worktree_path: string }>`
-        SELECT thread_id, json_extract(payload_json, '$.worktreePath') AS worktree_path
+      sql<{
+        readonly thread_id: string;
+        readonly worktree_path: string;
+        readonly archived: number;
+      }>`
+        SELECT
+          thread_id,
+          json_extract(payload_json, '$.worktreePath') AS worktree_path,
+          json_extract(payload_json, '$.archivedAt') IS NOT NULL AS archived
         FROM orchestration_v2_projection_threads
         WHERE deleted_at IS NULL
-          AND json_extract(payload_json, '$.archivedAt') IS NULL
           AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
       `.pipe(
         Effect.map((rows) =>
           rows.map((row) => ({
             threadId: ThreadId.make(row.thread_id),
             worktreePath: row.worktree_path,
+            archived: row.archived === 1,
           })),
         ),
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
@@ -6261,10 +6272,14 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         Ref.get(replayState).pipe(
           Effect.map((state) =>
             [...state.projections.values()].flatMap(({ thread }) =>
-              thread.deletedAt === null &&
-              thread.archivedAt === null &&
-              thread.worktreePath !== null
-                ? [{ threadId: thread.id, worktreePath: thread.worktreePath }]
+              thread.deletedAt === null && thread.worktreePath !== null
+                ? [
+                    {
+                      threadId: thread.id,
+                      worktreePath: thread.worktreePath,
+                      archived: thread.archivedAt !== null,
+                    },
+                  ]
                 : [],
             ),
           ),
