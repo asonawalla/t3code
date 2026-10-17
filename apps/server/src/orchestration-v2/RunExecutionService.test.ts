@@ -1757,6 +1757,31 @@ it.effect("keeps ingesting until the last of several background items terminaliz
   }),
 );
 
+it.effect("keeps ingesting background work after an event fails to ingest past root terminal", () =>
+  Effect.gen(function* () {
+    const unwritableProgress = (ids: BackgroundScenarioIds) => {
+      const event = subagentEvent(ids, "running");
+      return event.type === "subagent.updated"
+        ? { ...event, subagent: { ...event.subagent, progress: "unwritable" } }
+        : event;
+    };
+    const observed = yield* runBackgroundItemScenario(
+      "subagent-ingest-failure",
+      (ids) => [
+        subagentEvent(ids, "running"),
+        rootTerminalEvent(ids, "completed"),
+        unwritableProgress(ids),
+        subagentEvent(ids, "cancelled"),
+      ],
+      {
+        failIngest: (event) =>
+          event.type === "subagent.updated" && event.subagent.progress === "unwritable",
+      },
+    );
+    assert.deepEqual(observed, ["subagent:running", "root-finalized", "subagent:cancelled"]);
+  }),
+);
+
 it.effect("does not pin ingestion on background items when the root turn is interrupted", () =>
   Effect.gen(function* () {
     const observed = yield* runBackgroundItemScenario("bg-interrupted", (ids) => [
@@ -4174,7 +4199,7 @@ function backgroundTurnItemEventForRun(
 
 function subagentEvent(
   ids: BackgroundScenarioIds,
-  status: "running" | "completed" | "idle",
+  status: "running" | "completed" | "idle" | "cancelled",
 ): ProviderAdapter.ProviderAdapterV2Event {
   return {
     type: "subagent.updated",
@@ -4395,6 +4420,7 @@ function runBackgroundItemScenario(
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
     readonly onSubscribe?: Effect.Effect<void>;
+    readonly failIngest?: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean;
   },
 ) {
   return Effect.gen(function* () {
@@ -4427,6 +4453,13 @@ function runBackgroundItemScenario(
             ingestNormalized: (input) =>
               Effect.gen(function* () {
                 const event = input.event;
+                if (options?.failIngest?.(event) === true) {
+                  return yield* new ProviderEventIngestor.ProviderEventPublishError({
+                    providerSessionId: input.providerSessionId,
+                    eventCount: 1,
+                    cause: "database write failed",
+                  });
+                }
                 if (event.type === "turn_item.updated") {
                   yield* Ref.update(observed, (current) => [
                     ...current,
