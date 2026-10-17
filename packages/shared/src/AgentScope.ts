@@ -34,8 +34,8 @@ export interface AgentScopeShape {
   }) => Effect.Effect<AgentScopeCommand>;
   /**
    * Whether the latest agent scope of this thread was killed because the
-   * machine or the agents slice ran out of memory. The answer holds until the
-   * thread launches its next agent, so a retried failure reads the same.
+   * machine ran out of memory. The answer holds until the thread launches its
+   * next agent, so a retried failure reads the same.
    */
   readonly oomKilled: (threadId: string) => Effect.Effect<boolean>;
   /**
@@ -94,7 +94,7 @@ export interface AgentSystemdScope {
   readonly slice: string;
   readonly unit: string;
   readonly runtimeDir: string;
-  /** Extra `systemd-run` options, such as `--property=OOMPolicy=stop`. */
+  /** Extra `systemd-run` options, such as `--property=OOMPolicy=continue`. */
   readonly options: ReadonlyArray<string>;
 }
 
