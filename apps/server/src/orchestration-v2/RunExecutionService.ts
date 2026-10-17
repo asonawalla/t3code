@@ -1245,7 +1245,7 @@ export const layer: Layer.Layer<
                   const isRootProviderThreadUpdate =
                     event.type === "provider_thread.updated" &&
                     event.providerThread.id === input.providerThread.id;
-                  const storedEvents = yield* providerEventIngestor.ingestNormalized({
+                  const ingest = providerEventIngestor.ingestNormalized({
                     analyticsContext: {
                       modelSelection: input.modelSelection,
                       runtimeMode: input.runtimePolicy.runtimeMode,
@@ -1276,15 +1276,32 @@ export const layer: Layer.Layer<
                           }
                       : {}),
                   });
-                  storedEventCount = storedEvents.length;
-                  if (
-                    isRootProviderThreadUpdate &&
-                    rootTerminalAlreadySeen &&
-                    storedEventCount === 0
-                  ) {
-                    // Ownership lost (or thread row missing). Stop pinning the
-                    // stream on this run's background probe.
-                    yield* Ref.set(providerThreadOwnerLost, true);
+                  // Once the run settles, this subscription is the only path for its
+                  // background work's updates, including the one that ends that work.
+                  // Ending it on one failed write would leave a workflow Running forever.
+                  const storedEvents = (yield* Ref.get(rootRunFinalized))
+                    ? yield* ingest.pipe(
+                        Effect.catchCauseIf(
+                          (cause) => !Cause.hasInterruptsOnly(cause),
+                          (cause) =>
+                            Effect.logWarning(
+                              "orchestration V2 provider event ingestion failed after its run settled",
+                              { runId: input.run.id, eventType: deliveredEvent.type, cause },
+                            ).pipe(Effect.as(null)),
+                        ),
+                      )
+                    : yield* ingest;
+                  if (storedEvents !== null) {
+                    storedEventCount = storedEvents.length;
+                    if (
+                      isRootProviderThreadUpdate &&
+                      rootTerminalAlreadySeen &&
+                      storedEventCount === 0
+                    ) {
+                      // Ownership lost (or thread row missing). Stop pinning the
+                      // stream on this run's background probe.
+                      yield* Ref.set(providerThreadOwnerLost, true);
+                    }
                   }
                 }
                 if (event.type === "provider_thread.updated") {
