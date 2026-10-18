@@ -1677,6 +1677,55 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return remoteName;
   });
 
+  // The remote the local `branchName` tracks, such as the fork a local main follows.
+  // A remote fetched for someone else's pull request is never it.
+  const readTrackedRemoteName = Effect.fn("readTrackedRemoteName")(function* (
+    cwd: string,
+    branchName: string,
+  ) {
+    const ref = `refs/heads/${branchName}`;
+    const stdout = yield* runGitStdout(
+      "GitVcsDriver.readTrackedRemoteName",
+      cwd,
+      ["for-each-ref", "--format=%(refname) %(upstream:remotename)", ref],
+      true,
+    );
+    const remoteName = stdout
+      .split("\n")
+      .map((line) => line.trim().split(" "))
+      .find(([refName]) => refName === ref)?.[1];
+    return remoteName && remoteName !== "." ? remoteName : null;
+  });
+
+  // The copy that leaves the fewest of `refName`'s commits outside it is the one
+  // the branch was cut from. Ties keep the earlier copy.
+  const closestCopy = Effect.fn("closestCopy")(function* (
+    cwd: string,
+    refName: string,
+    copies: readonly [string, ...string[]],
+  ) {
+    let closest = copies[0];
+    let fewestOutside = Number.POSITIVE_INFINITY;
+    for (const copy of copies) {
+      const stdout = yield* runGitStdout(
+        "GitVcsDriver.closestCopy",
+        cwd,
+        ["rev-list", "--count", `${copy}..refs/heads/${refName}`],
+        true,
+      );
+      const outside = Number.parseInt(stdout.trim(), 10);
+      if (outside < fewestOutside) {
+        closest = copy;
+        fewestOutside = outside;
+      }
+    }
+    return closest;
+  });
+
+  // Picks the base branch name from gh-merge-base, the default branch, then main or
+  // master, and returns the primary remote's copy, else the local branch. When the local
+  // base tracks another remote, as with a fork beside its upstream, the copy the branch
+  // was cut from wins, so Changes holds only the branch's commits.
   // `allowRemoteOfCurrent` lets the review diff compare the default branch with its remote copy.
   const resolveBaseBranchForNoUpstream = Effect.fn("resolveBaseBranchForNoUpstream")(function* (
     cwd: string,
@@ -1716,34 +1765,42 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       if (normalizedCandidate.length === 0) {
         continue;
       }
-      if (normalizedCandidate === refName) {
-        if (
-          options?.allowRemoteOfCurrent &&
-          primaryRemoteName &&
-          (yield* remoteBranchExists({
-            cwd,
-            remoteName: primaryRemoteName,
-            refName: normalizedCandidate,
-          }))
-        ) {
-          return `${primaryRemoteName}/${normalizedCandidate}`;
-        }
+      const isCurrent = normalizedCandidate === refName;
+      if (isCurrent && !options?.allowRemoteOfCurrent) {
         continue;
       }
 
-      if (
+      const primaryCopy =
         primaryRemoteName &&
         (yield* remoteBranchExists({
           cwd,
           remoteName: primaryRemoteName,
           refName: normalizedCandidate,
         }))
-      ) {
-        return `${primaryRemoteName}/${normalizedCandidate}`;
+          ? `${primaryRemoteName}/${normalizedCandidate}`
+          : null;
+      if (primaryCopy === null && !isCurrent && (yield* branchExists(cwd, normalizedCandidate))) {
+        return normalizedCandidate;
       }
 
-      if (yield* branchExists(cwd, normalizedCandidate)) {
-        return normalizedCandidate;
+      const copies = primaryCopy === null ? [] : [primaryCopy];
+      const trackedRemoteName = yield* readTrackedRemoteName(cwd, normalizedCandidate);
+      if (
+        trackedRemoteName !== null &&
+        trackedRemoteName !== primaryRemoteName &&
+        (yield* remoteBranchExists({
+          cwd,
+          remoteName: trackedRemoteName,
+          refName: normalizedCandidate,
+        }))
+      ) {
+        copies.push(`${trackedRemoteName}/${normalizedCandidate}`);
+      }
+      const [firstCopy, ...otherCopies] = copies;
+      if (firstCopy !== undefined) {
+        return otherCopies.length === 0
+          ? firstCopy
+          : yield* closestCopy(cwd, refName, [firstCopy, ...otherCopies]);
       }
     }
 

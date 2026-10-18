@@ -2414,6 +2414,95 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("counts Changes from the copy of main a branch was cut from", () =>
+      Effect.gen(function* () {
+        const upstream = yield* makeTmpDir();
+        yield* initRepoWithCommit(upstream);
+        yield* git(upstream, ["branch", "-M", "main"]);
+        const fork = yield* makeTmpDir();
+        yield* git(fork, ["clone", upstream, "."]);
+        yield* git(fork, ["config", "user.email", "test@test.com"]);
+        yield* git(fork, ["config", "user.name", "Test"]);
+        yield* writeTextFile(fork, "fork.txt", "one\ntwo\nthree\n");
+        yield* git(fork, ["add", "fork.txt"]);
+        yield* git(fork, ["commit", "-m", "fork-only work"]);
+        yield* writeTextFile(upstream, "upstream.txt", "upstream\n");
+        yield* git(upstream, ["add", "upstream.txt"]);
+        yield* git(upstream, ["commit", "-m", "upstream-only work"]);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", upstream, "."]);
+        yield* git(cwd, ["config", "user.email", "test@test.com"]);
+        yield* git(cwd, ["config", "user.name", "Test"]);
+        yield* git(cwd, ["remote", "add", "fork", fork]);
+        yield* git(cwd, ["fetch", "fork"]);
+        // Local main follows the fork, so both copies of main can be the base.
+        yield* git(cwd, ["branch", "--set-upstream-to", "fork/main", "main"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const changes = Effect.map(
+          driver.statusDetailsLocal(cwd, { includeBranchChanges: true }),
+          (status) => status.branchChanges,
+        );
+
+        yield* git(cwd, ["switch", "-c", "from-fork", "fork/main"]);
+        yield* writeTextFile(cwd, "from-fork.txt", "fork feature\n");
+        yield* git(cwd, ["add", "from-fork.txt"]);
+        yield* git(cwd, ["commit", "-m", "work on the fork"]);
+        assert.deepStrictEqual(yield* changes, {
+          baseRef: "fork/main",
+          insertions: 1,
+          deletions: 0,
+        });
+
+        yield* git(cwd, ["switch", "-c", "from-origin", "origin/main"]);
+        yield* writeTextFile(cwd, "from-origin.txt", "origin\nfeature\n");
+        yield* git(cwd, ["add", "from-origin.txt"]);
+        yield* git(cwd, ["commit", "-m", "work on upstream"]);
+        assert.deepStrictEqual(yield* changes, {
+          baseRef: "origin/main",
+          insertions: 2,
+          deletions: 0,
+        });
+
+        yield* git(cwd, ["switch", "main"]);
+        yield* git(cwd, ["reset", "--hard", "fork/main"]);
+        yield* writeTextFile(cwd, "local.txt", "local\n");
+        assert.deepStrictEqual(yield* changes, {
+          baseRef: "fork/main",
+          insertions: 1,
+          deletions: 0,
+        });
+      }),
+    );
+
+    it.effect("never counts Changes from a pull request author's copy of main", () =>
+      Effect.gen(function* () {
+        const upstream = yield* makeTmpDir();
+        yield* initRepoWithCommit(upstream);
+        yield* git(upstream, ["branch", "-M", "main"]);
+        const author = yield* makeTmpDir();
+        yield* git(author, ["clone", upstream, "."]);
+        yield* git(author, ["config", "user.email", "test@test.com"]);
+        yield* git(author, ["config", "user.name", "Test"]);
+        yield* writeTextFile(author, "pr.txt", "pull\nrequest\n");
+        yield* git(author, ["add", "pr.txt"]);
+        yield* git(author, ["commit", "-m", "pull request work"]);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", upstream, "."]);
+        // How a checkout of a pull request opened from the author's main looks.
+        yield* git(cwd, ["remote", "add", "author", author]);
+        yield* git(cwd, ["fetch", "author", "+refs/heads/main:refs/remotes/author/main"]);
+        yield* git(cwd, ["switch", "-c", "t3code/pr-42/main", "author/main"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const status = yield* driver.statusDetailsLocal(cwd, { includeBranchChanges: true });
+        assert.deepStrictEqual(status.branchChanges, {
+          baseRef: "origin/main",
+          insertions: 2,
+          deletions: 0,
+        });
+      }),
+    );
+
     it.effect("reports non-repository directories without failing", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
