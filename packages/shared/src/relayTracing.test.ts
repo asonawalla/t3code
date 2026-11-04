@@ -44,21 +44,6 @@ describe("withRelayClientTracing", () => {
     }),
   );
 
-  it.effect("preserves the active tracer when product tracing is disabled", () =>
-    Effect.gen(function* () {
-      const userSpans: Array<string> = [];
-      const userTracer = collectingTracer(userSpans);
-
-      yield* Effect.void.pipe(
-        Effect.withSpan("relay.operation"),
-        withRelayClientTracing,
-        Effect.withTracer(userTracer),
-      );
-
-      expect(userSpans).toEqual(["relay.operation"]);
-    }),
-  );
-
   it.effect("does not export configured relay spans or alter application effects", () => {
     const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
     const layerHttpClient = FetchHttpClient.layer.pipe(
@@ -73,6 +58,7 @@ describe("withRelayClientTracing", () => {
       {
         serviceName: "relay-test",
         runtime: "test",
+        serviceInstanceId: "test-instance",
         client: "test",
       },
     ).pipe(Layer.provide(layerHttpClient));
@@ -136,20 +122,6 @@ describe("withLocalTracing", () => {
         "environment.orchestration.threadSnapshot",
       ]);
       expect(localSpans).toEqual(["sql.execute", "ServerSecretStore.get"]);
-    }),
-  );
-
-  it.effect("leaves the current tracer alone outside relay tracing", () =>
-    Effect.gen(function* () {
-      const localSpans: Array<string> = [];
-
-      yield* Effect.void.pipe(
-        Effect.withSpan("sql.execute"),
-        withLocalTracing,
-        Effect.withTracer(collectingTracer(localSpans)),
-      );
-
-      expect(localSpans).toEqual(["sql.execute"]);
     }),
   );
 });

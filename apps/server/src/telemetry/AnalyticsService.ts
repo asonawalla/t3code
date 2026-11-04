@@ -1,5 +1,5 @@
 /**
- * Inert product analytics service. PostHog collection is disabled in this build.
+ * Inert product analytics service. PostHog and T3 ingest collection is disabled in this build.
  *
  * @module AnalyticsService
  */
@@ -7,9 +7,12 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import type { TelemetryOwner } from "./Identify.ts";
+
 const disabledAnalytics = {
   record: () => Effect.void,
   flush: Effect.void,
+  recordOwners: () => Effect.void,
 };
 
 export class AnalyticsService extends Context.Service<
@@ -23,13 +26,14 @@ export class AnalyticsService extends Context.Service<
 
     /** No-op; analytics events are never queued. */
     readonly flush: Effect.Effect<void>;
+
+    /** Accept install owners without recording or sending them. */
+    readonly recordOwners: (
+      owners: ReadonlyArray<TelemetryOwner>,
+      observedBy: "server" | "client",
+    ) => Effect.Effect<void>;
   }
->()("t3/telemetry/AnalyticsService") {
-  static readonly layerTest = Layer.succeed(
-    AnalyticsService,
-    AnalyticsService.of(disabledAnalytics),
-  );
-}
+>()("t3/telemetry/AnalyticsService") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.succeed(AnalyticsService.of(disabledAnalytics));

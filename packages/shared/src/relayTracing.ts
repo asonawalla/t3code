@@ -14,8 +14,10 @@ export interface RelayClientTracingResource {
   readonly serviceName: string;
   readonly serviceVersion?: string;
   readonly runtime: string;
+  readonly serviceInstanceId: string;
   readonly client: string;
   readonly component?: string;
+  readonly attributes?: Readonly<Record<string, string>> | undefined;
 }
 
 export class RelayClientTracer extends Context.Reference(
@@ -25,19 +27,11 @@ export class RelayClientTracer extends Context.Reference(
   },
 ) {}
 
-/**
- * The tracer that was active before relay tracing took over, so work nested
- * inside a relay span can return to it.
- */
 class LocalTracer extends Context.Reference("@t3tools/shared/relayTracing/LocalTracer", {
   defaultValue: () => Option.none<Tracer.Tracer>(),
 }) {}
 
-/**
- * Exports every span `effect` creates through the product tracer. Use it only
- * around T3 Connect work; wrap local work inside it with
- * {@link withLocalTracing} so it stays off the product tracer.
- */
+/** Export only T3 Connect spans; wrap local work with {@link withLocalTracing}. */
 export const withRelayClientTracing = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> =>
@@ -58,11 +52,7 @@ export const withRelayClientTracing = <A, E, R>(
     ),
   );
 
-/**
- * Runs `effect` on the tracer that was active outside relay tracing. Its spans
- * stay in the local trace and are never exported, so a relay span can time the
- * work without shipping what the user's machine did to answer it.
- */
+/** Keep local work in the local trace without exporting machine details through relay spans. */
 export const withLocalTracing = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
   LocalTracer.pipe(
     Effect.flatMap(

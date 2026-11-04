@@ -18,6 +18,7 @@ it.effect("does not resolve identity or send events when legacy settings enable 
     yield* Effect.gen(function* () {
       const analytics = yield* AnalyticsService.AnalyticsService;
       yield* analytics.record("test.disabled", { provider: "codex" });
+      yield* analytics.recordOwners([{ source: "connect", ownerId: "a".repeat(64) }], "server");
       yield* analytics.flush;
     }).pipe(
       Effect.provide(AnalyticsService.layer),

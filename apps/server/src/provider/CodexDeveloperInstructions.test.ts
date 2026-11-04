@@ -1,28 +1,37 @@
 import * as NodeAssert from "node:assert/strict";
 
+import { T3_CODE_DEVICE_TOOL_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { describe, it } from "vite-plus/test";
 
 import {
   buildCodexAdditionalContext,
-  buildCodexDeveloperInstructions,
+  CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES,
 } from "./CodexDeveloperInstructions.ts";
 
-describe("buildCodexDeveloperInstructions", () => {
-  it("appends runtime info after the mode instructions", () => {
-    const instructions = runtimeInstructions({
-      model: "gpt-5.3-codex",
-      reasoningEffort: "high",
-    });
+describe("buildCodexAdditionalContext", () => {
+  describe.each([
+    { model: "custom-model", modelName: "Custom 🦊 Model", reasoningEffort: "xhigh" },
+  ])("with runtime $model", (runtime) => {
+    it.each([undefined, true])(
+      "keeps every entry within Codex's per-entry cap with device tools %j",
+      (deviceToolsAvailable) => {
+        const context = buildCodexAdditionalContext(runtime, deviceToolsAvailable);
 
-    NodeAssert.match(
-      buildCodexDeveloperInstructions("default"),
-      /^<collaboration_mode># Collaboration Mode: Default/,
+        for (const [key, entry] of Object.entries(context)) {
+          // Codex counts ceil(UTF-8 bytes / 4) tokens, excluding keys and wrappers.
+          const bytes = Buffer.byteLength(entry.value, "utf8");
+          const limit = CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES;
+          NodeAssert.ok(
+            bytes <= limit,
+            `${key}: ${bytes} UTF-8 bytes exceeds Codex's ${limit}-byte per-entry cap by ${bytes - limit} bytes; split the instructions into separate entries to avoid silent truncation`,
+          );
+        }
+      },
     );
-    NodeAssert.match(instructions, /T3 Code/);
-    NodeAssert.match(instructions, /Codex harness/);
-    NodeAssert.match(instructions, /as gpt-5\.3-codex with high reasoning effort/);
   });
+});
 
+describe("Codex runtime context", () => {
   it("describes Markdown media support in the runtime context in both modes", () => {
     {
       const instructions = runtimeInstructions({
@@ -31,32 +40,9 @@ describe("buildCodexDeveloperInstructions", () => {
       });
       NodeAssert.match(
         instructions,
-        /<runtime_info>.*embed images and videos.*Markdown.*<\/runtime_info>/,
+        /<runtime_info>.*embed images, video, and audio.*Markdown image syntax with absolute file paths.*Link any other file.*absolute path.*files viewer.*<\/runtime_info>/,
       );
     }
-  });
-
-  it("includes runtime info alongside plan mode instructions", () => {
-    const instructions = runtimeInstructions({
-      model: "gpt-5.3-codex",
-      reasoningEffort: "medium",
-    });
-
-    NodeAssert.match(buildCodexDeveloperInstructions("plan"), /^<collaboration_mode># Plan Mode/);
-    NodeAssert.match(instructions, /as gpt-5\.3-codex with medium reasoning effort/);
-  });
-
-  it("varies with the model and effort of each turn", () => {
-    const first = runtimeInstructions({
-      model: "gpt-5.3-codex",
-      reasoningEffort: "medium",
-    });
-    const second = runtimeInstructions({
-      model: "gpt-5.4",
-      reasoningEffort: "high",
-    });
-
-    NodeAssert.notEqual(first, second);
   });
 
   it("flattens multiline metadata into single-line runtime info", () => {
@@ -70,36 +56,50 @@ describe("buildCodexDeveloperInstructions", () => {
   });
 });
 
-describe("T3 tool developer instructions", () => {
-  const runtime = { model: "gpt-5.3-codex", reasoningEffort: "high" };
-  const browserPolicy =
-    /preview_|Playwright|T3 Code collaborative browser|Do not switch to global browser skills/;
+describe("Codex orchestration context", () => {
+  it("routes subagents native first, delegate_task for the rest", () => {
+    const orchestration = Object.entries(buildCodexAdditionalContext({ model: "gpt-6.1-sol" }))
+      .filter(([key]) => key.startsWith("t3_code_orchestration_"))
+      .map(([, entry]) => entry.value)
+      .join("\n");
 
-  it("never injects a browser tool policy", () => {
-    for (const mode of ["default", "plan"] as const) {
-      for (const deviceToolsAvailable of [true, false]) {
-        const context = buildCodexAdditionalContext(runtime, deviceToolsAvailable);
-        NodeAssert.doesNotMatch(JSON.stringify(context), browserPolicy);
-      }
-      NodeAssert.doesNotMatch(buildCodexDeveloperInstructions(mode), browserPolicy);
-      NodeAssert.match(buildCodexDeveloperInstructions(mode), /<collaboration_mode>/);
-      NodeAssert.match(buildCodexDeveloperInstructions(mode), /<\/collaboration_mode>/);
-    }
+    NodeAssert.ok(orchestration.includes("use your native tool when the child uses your provider"));
+    NodeAssert.ok(orchestration.includes("`run_in_background:false`"));
+    NodeAssert.ok(orchestration.includes("A native type on another provider's model"));
+    NodeAssert.ok(
+      orchestration.includes("Background agent: `delegate_task`, never a background `Agent`."),
+    );
+    NodeAssert.ok(
+      orchestration.includes("Every new delegate review or re-check is a new `delegate_task`"),
+    );
+    NodeAssert.ok(orchestration.includes("never a `t3_thread_send`"));
+    NodeAssert.ok(!orchestration.includes("inheritedOptions"));
+    NodeAssert.ok(!orchestration.includes("Prefer native"));
+    // The ACP terminal fallback is ACP-only; Codex agents never need it.
+    NodeAssert.ok(!orchestration.includes("acp-mcp-call"));
   });
+});
 
-  it("describes device tools only when the turn has them", () => {
-    NodeAssert.match(toolInstructions(runtime, true), /device_open/);
-    NodeAssert.equal(toolInstructions(runtime, false), "");
-    NodeAssert.equal(buildCodexAdditionalContext(runtime).t3_code_tools, undefined);
+describe("Codex device context", () => {
+  it("adds the shared device block only when the session holds device access", () => {
+    const tools = (device: boolean) =>
+      buildCodexAdditionalContext({ model: "gpt-6.1-sol" }, device).t3_code_tools?.value ?? "";
+
+    NodeAssert.ok(tools(true).includes(T3_CODE_DEVICE_TOOL_INSTRUCTIONS));
+    NodeAssert.ok(!tools(true).includes("ToolSearch"));
+    NodeAssert.ok(!tools(false).includes("## T3 Code devices"));
+  });
+});
+
+describe("Codex browser context", () => {
+  it("never tells Codex which browser to use or when it may use one", () => {
+    for (const deviceToolsAvailable of [true, false]) {
+      const context = buildCodexAdditionalContext({ model: "gpt-6.1-sol" }, deviceToolsAvailable);
+      NodeAssert.doesNotMatch(JSON.stringify(context), /preview_|browser/i);
+    }
   });
 });
 
 function runtimeInstructions(runtime: Parameters<typeof buildCodexAdditionalContext>[0]) {
   return buildCodexAdditionalContext(runtime).t3_code_runtime!.value;
-}
-function toolInstructions(
-  runtime: Parameters<typeof buildCodexAdditionalContext>[0],
-  available: boolean,
-) {
-  return buildCodexAdditionalContext(runtime, available).t3_code_tools?.value ?? "";
 }

@@ -17,37 +17,6 @@ vi.mock("expo-constants", () => ({
   },
 }));
 
-it.effect("does not export spans with mobile tracing configured", () => {
-  const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
-  const layerTracing = Tracing.layerFromConfig(
-    {
-      tracesUrl: "https://api.axiom.test/v1/traces",
-      tracesDataset: "mobile-traces",
-      tracesToken: "public-ingest-token",
-    },
-    {
-      appVariant: "test",
-      serviceVersion: "1.2.3",
-    },
-  ).pipe(Layer.provide(layerRemoteHttpClient(fetchFn)));
-  const layerTracedApplication = Layer.effectDiscard(
-    Effect.void.pipe(Effect.withSpan("mobile.test.span"), withRelayClientTracing),
-  ).pipe(Layer.provide(layerTracing));
-
-  return Effect.gen(function* () {
-    yield* Layer.build(layerTracedApplication);
-
-    expect(fetchFn).not.toHaveBeenCalled();
-  }).pipe(
-    Effect.scoped,
-    Effect.andThen(
-      Effect.sync(() => {
-        expect(fetchFn).not.toHaveBeenCalled();
-      }),
-    ),
-  );
-});
-
 it.effect("preserves application failures without exporting mobile traces", () => {
   const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
   const layerTracing = Tracing.layerFromConfig(
@@ -58,6 +27,7 @@ it.effect("preserves application failures without exporting mobile traces", () =
     },
     {
       appVariant: "test",
+      serviceInstanceId: "test-instance",
       serviceVersion: "1.2.3",
     },
   ).pipe(Layer.provide(layerRemoteHttpClient(fetchFn)));

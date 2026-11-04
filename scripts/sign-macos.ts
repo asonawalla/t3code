@@ -2,7 +2,6 @@ import { sign as signApplication, type SignOptions } from "@electron/osx-sign";
 
 import { loadRepoEnv } from "./lib/public-config.ts";
 
-/** Sign files with matching options together instead of spawning codesign for each file. */
 export default async function sign(options: SignOptions): Promise<void> {
   if (options.platform === "darwin" && options.type === "development") {
     const identity = loadRepoEnv().T3CODE_DESKTOP_LOCAL_SIGN_IDENTITY?.trim();

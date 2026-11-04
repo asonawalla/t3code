@@ -15,7 +15,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("batches codesign calls without changing existing signing options", async () => {
+it("leaves release signing options alone when a local identity is configured", async () => {
   vi.mocked(PublicConfig.loadRepoEnv).mockReturnValue({
     T3CODE_DESKTOP_LOCAL_SIGN_IDENTITY: "local-development-identity",
   });
