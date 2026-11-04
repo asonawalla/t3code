@@ -9,13 +9,8 @@ relay tracing environment variables cannot enable collection.
 
 ## Mobile app crash reports
 
-When the iOS or Android app crashes or hits an error, it sends a report to T3 Code: the error
-message, the stack trace, the app version, and the device model and OS version. Each launch also
-sends startup timings, and every report carries a random ID for the install. Reports go through
-the T3 Connect relay to Axiom. They do not include your threads, prompts, or connection details,
-but an error message can quote a value the app was handling.
-
-To stop sending them, turn off **Send crash reports** in **Settings > About T3 Code > Diagnostics**.
+The iOS and Android apps do not send crash reports, error reports, or startup timings. To share a
+startup crash yourself, use **Copy crash report** in **Settings > About T3 Code > Diagnostics**.
 
 ## Export diagnostics to your own receiver
 

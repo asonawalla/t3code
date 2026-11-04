@@ -126,11 +126,12 @@ Monitors count HTTP status codes, not span errors. A request the relay cuts off 
 ends as an interrupted span without an error flag, but still answers 504. `/connect` 502s are
 normal: offline hosts produce most of them, retried by their clients every few seconds.
 
-The dashboard's "Connecting" charts show connections as users see them. Web, desktop, and mobile
-export a root `relay.connection.attempt` span per attempt, which lasts until initial sync finishes, in
-the same trace as the relay's and the host's spans. Most reconnects reuse a cached relay token and go
-straight to the host, so relay latency only affects cold connects. A slow total with fast phases
-usually means the client waited out an unreachable direct (LAN) route before falling back to the relay.
+The dashboard's "Connecting" charts read the root `relay.connection.attempt` span a client exports per
+attempt, which lasts until initial sync finishes, in the same trace as the relay's and the host's
+spans. Web, desktop, and mobile clients in this build export none, so the charts show only clients that
+do. Most reconnects reuse a cached relay token and go straight to the host, so relay latency only
+affects cold connects. A slow total with fast phases usually means the client waited out an
+unreachable direct (LAN) route before falling back to the relay.
 
 **Links failing / tunnel recovery failing.** Open the dashboard's "Link failures by reason" table.
 `provisioning: ensure-tunnel` or `configure-tunnel` with Cloudflare 429s on the "Cloudflare API calls
@@ -168,13 +169,14 @@ usual cause.
 
 ## Mobile crashes and errors
 
-The mobile app reports through [`expo-observe`](https://docs.expo.dev/eas/observe/). Its
-`endpointUrl` points at the relay (`/v1/mobile/observe`, set in `apps/mobile/app.config.ts` from
-`T3CODE_RELAY_URL`), because Observe cannot send auth headers and prefixes every path with the EAS
-project id. The relay forwards each request to Axiom with its own token: logs (JavaScript errors,
-native crashes, log events) to `t3-code-mobile-logs-*`, metrics to `t3-code-mobile-metrics-*`, and
-spans to the shared traces dataset. Expo's Observe dashboard receives nothing. The endpoint URL is
-compiled into the native app, so pointing it elsewhere takes a store build.
+The mobile app in this build links [`expo-observe`](https://docs.expo.dev/eas/observe/) but never
+dispatches: `apps/mobile/app.config.ts` compiles in an unresolvable `endpointUrl`, and
+`apps/mobile/src/features/observability/observe.ts` keeps dispatching off. The relay's
+`/v1/mobile/observe` route exists because Observe cannot send auth headers and prefixes every path
+with the EAS project id. It forwards each request to Axiom with its own token: logs (JavaScript
+errors, native crashes, log events) to `t3-code-mobile-logs-*`, metrics to
+`t3-code-mobile-metrics-*`, and spans to the shared traces dataset. The endpoint URL is compiled
+into the native app, so changing it takes a store build.
 
 Hermes stacks from release builds are minified bytecode offsets. On the way through, the relay
 rewrites each JavaScript exception's `exception.stacktrace` with the bundle's source map from R2

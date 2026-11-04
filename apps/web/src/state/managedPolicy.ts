@@ -30,13 +30,11 @@ export function firstManagedDenial(
   return undefined;
 }
 
-/** What usage-data notices say when the policy turns product analytics off. */
+/** What usage-data notices say. This build collects none, whatever the policy says. */
 export function managedTelemetryOffMessage(
-  policy: ManagedPolicySummary | undefined,
+  _policy: ManagedPolicySummary | undefined,
 ): string | undefined {
-  return policy?.limits?.telemetry === false
-    ? `${policy.organization} turned off anonymous usage data.`
-    : undefined;
+  return "This build does not collect usage data.";
 }
 
 export interface ManagedInstanceLocks {
