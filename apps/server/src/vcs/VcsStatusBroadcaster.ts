@@ -271,7 +271,11 @@ export const make = Effect.gen(function* () {
   const withRemoteWriteLock = <A, E, R>(
     cwd: string,
     effect: (generation: number) => Effect.Effect<A, E, R>,
-  ) => remoteWriteLocks.withLock(cwd, Effect.suspend(() => effect(remoteWriteGeneration(cwd))));
+  ) =>
+    remoteWriteLocks.withLock(
+      cwd,
+      Effect.suspend(() => effect(remoteWriteGeneration(cwd))),
+    );
   const pollersRef = yield* SynchronizedRef.make(new Map<string, ActiveRemotePoller>());
 
   const getCachedStatus = Effect.fn("VcsStatusBroadcaster.getCachedStatus")(function* (

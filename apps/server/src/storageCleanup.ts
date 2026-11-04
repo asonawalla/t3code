@@ -1442,18 +1442,19 @@ const make = Effect.gen(function* () {
   });
 
   // An archived thread's checkout waits for its sessions and terminals to stop.
-  const sweepIfArchived = Effect.fn("StorageCleanup.sweepIfArchived")(function* (
-    threadId: ThreadId,
-  ) {
-    const thread = yield* projections.getThreadShell(threadId);
-    if (
-      thread !== null &&
-      thread.archivedAt !== null &&
-      thread.deletedAt === null &&
-      thread.worktreePath !== null
-    )
-      yield* requestSweep;
-  }, Effect.ignore);
+  const sweepIfArchived = Effect.fn("StorageCleanup.sweepIfArchived")(
+    function* (threadId: ThreadId) {
+      const thread = yield* projections.getThreadShell(threadId);
+      if (
+        thread !== null &&
+        thread.archivedAt !== null &&
+        thread.deletedAt === null &&
+        thread.worktreePath !== null
+      )
+        yield* requestSweep;
+    },
+    (effect) => Effect.ignore(effect),
+  );
 
   const start = Effect.fn("StorageCleanup.start")(function* () {
     // Threads whose terminal stopped, checked once the server is active.
