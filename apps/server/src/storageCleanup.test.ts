@@ -2137,18 +2137,6 @@ describe("storage cleanup reports and local file policies", () => {
         shell({ id: ThreadId.make("thread-2"), branch: "feature", worktreePath: worktree }),
       ],
     ],
-    [
-      "an archived thread starts using it",
-      (worktree: string) => [
-        shell({ branch: "feature", worktreePath: worktree }),
-        shell({
-          id: ThreadId.make("thread-2"),
-          branch: "feature",
-          worktreePath: worktree,
-          archivedAt: at(-DAY_MS),
-        }),
-      ],
-    ],
   ] as const)("keeps a worktree when %s during size measurement", ([, threadsWhileMeasuring]) =>
     runCleanupTest(
       Effect.gen(function* () {
@@ -2803,6 +2791,26 @@ describe("archived thread worktrees", () => {
           expect(yield* fs.exists(worktree)).toBe(false);
         }),
       ),
+  );
+
+  it.live("lets the rules remove an active thread's checkout that archived threads also use", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setSettings({
+          storageCleanup: {
+            ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+            worktreeSettledAfterDays: 0,
+          },
+        });
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree, settledAt: at(0) }),
+          archivedShell(fixture.worktree, { id: ThreadId.make("thread-2"), title: "Second" }),
+        ]);
+        expect((yield* fixture.service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      }),
+    ),
   );
 
   it.live("keeps a checkout that was unarchived while it was measured", () =>

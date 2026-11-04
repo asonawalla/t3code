@@ -10,10 +10,7 @@ export interface AgentScopeShape {
     readonly env?: NodeJS.ProcessEnv | undefined;
     /** Terminals may survive restarts; agents must remain eligible for orphan cleanup. */
     readonly survivesRestart?: boolean | undefined;
-    /**
-     * Keep a shared process running after a tool OOM when supported.
-     * Falls back to ordinary scope behavior on older systemd.
-     */
+    /** Serves other threads too: never force-stopped for one, and its OOM is not pinned on the launch thread. */
     readonly shared?: boolean | undefined;
   }) => Effect.Effect<AgentScopeCommand>;
   readonly oomKilled: (threadId: string) => Effect.Effect<boolean>;

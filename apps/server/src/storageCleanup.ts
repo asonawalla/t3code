@@ -865,6 +865,12 @@ const make = Effect.gen(function* () {
     const deletedByPath = Map.groupBy(deletedThreads, (thread) =>
       path.resolve(thread.worktreePath!),
     );
+    // A checkout an active thread uses follows the rules, and archived threads do not
+    // count as sharing it. One that only archived threads use goes once all are idle.
+    const usersOf = (group: ReadonlyArray<OrchestrationV2ThreadShell>) => {
+      const active = group.filter((member) => member.archivedAt === null);
+      return active.length > 0 ? active : group;
+    };
     const candidates = [
       ...[...groups].map(
         ([worktreePath, group]) =>
@@ -877,16 +883,17 @@ const make = Effect.gen(function* () {
                 resolveWorktreeCleanup(serverSettings, deleted.projectId).worktreeOnDelete &&
                 worktreeOwner([deleted, ...group]) === deleted,
             ) ??
-          worktreeOwner(group) ??
-          group[0]!,
+          worktreeOwner(usersOf(group)) ??
+          usersOf(group)[0]!,
       ),
       ...deletedThreads.filter((thread) => !groups.has(path.resolve(thread.worktreePath!))),
     ];
     for (const thread of candidates) {
       const settings = resolveWorktreeCleanup(serverSettings, thread.projectId);
       const worktreePath = path.resolve(thread.worktreePath!);
-      const group = groups.get(worktreePath) ?? [];
       const deleted = "workspaceRoot" in thread;
+      const allUsers = groups.get(worktreePath) ?? [];
+      const group = deleted ? allUsers : usersOf(allUsers);
       // Once every thread using it is archived, only work that removal would
       // lose keeps a checkout: ignored files such as .env do not.
       const archived = !deleted && group.every((member) => member.archivedAt !== null);
@@ -1124,7 +1131,11 @@ const make = Effect.gen(function* () {
           const latestShells = yield* Effect.forEach(latest, (entry) =>
             projections.getThreadShell(entry.threadId),
           );
-          const latestGroup = latestShells.filter((shell) => shell !== null);
+          const latestUsers = latestShells.filter((shell) => shell !== null);
+          const latestGroup =
+            deleted || archived
+              ? latestUsers
+              : latestUsers.filter((shell) => shell.archivedAt === null);
           const latestOwner = worktreeOwner(deleted ? [thread, ...latestGroup] : latestGroup);
           if (
             latestGroup.length !== group.length ||

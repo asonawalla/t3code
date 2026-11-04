@@ -1,6 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off -- unit names and RAM size come from the host.
+// @effect-diagnostics nodeBuiltinImport:off -- unit names come from node:crypto.
 import * as NodeCrypto from "node:crypto";
-import * as NodeOS from "node:os";
 
 import {
   AgentScope,
@@ -31,17 +30,6 @@ export function ownedAgentSlice(stateDir: string): string {
   return `app-t3code-agents-${hash}.slice`;
 }
 
-const GiB = 1024 ** 3;
-
-/**
- * Agents together leave about 4 GB free before the kernel kills one, so the
- * server, sshd, and tailscaled keep working. Small machines still give agents
- * three quarters of RAM.
- */
-function agentSliceMemoryMax(totalBytes: number) {
-  return Math.max(totalBytes - 4 * GiB, Math.floor(totalBytes * 0.75));
-}
-
 export interface ScopeState {
   readonly loadState: string;
   readonly activeState: string;
@@ -50,7 +38,7 @@ export interface ScopeState {
   readonly populated: boolean | undefined;
 }
 
-/** Pipes can close before systemd records oom-kill; stopping, empty or OOM-counted scopes remain pending. */
+/** Pipes can close before systemd finishes with a scope; stopping or empty scopes remain pending. */
 export function classifyScope(state: ScopeState): "oom-killed" | "gone" | "running" | "stopping" {
   if (state.result === "oom-kill") return "oom-killed";
   if (
@@ -60,11 +48,7 @@ export function classifyScope(state: ScopeState): "oom-killed" | "gone" | "runni
   ) {
     return "gone";
   }
-  if (
-    state.activeState === "deactivating" ||
-    (state.oomKills ?? 0) > 0 ||
-    state.populated === false
-  ) {
+  if (state.activeState === "deactivating" || state.populated === false) {
     return "stopping";
   }
   return "running";
@@ -87,6 +71,7 @@ function parseCgroupCounter(text: string, key: string): number | undefined {
 // systemd's default 90 s stop timeout would outlast our leftover-agent wait.
 // Delegation lets rootless containers (Podman, kind) manage their own cgroups.
 const SCOPE_OPTIONS = ["--property=TimeoutStopSec=10s", "--property=Delegate=yes"];
+const OOM_POLICY_OPTION = "--property=OOMPolicy=continue";
 const STOPPING_POLL_INTERVAL = "100 millis";
 const STOPPING_POLL_ATTEMPTS = 20;
 const CLEAR_FAILED_INTERVAL = "1 second";
@@ -158,6 +143,17 @@ export const make = Effect.gen(function* () {
       const systemctl = yield* resolve("systemctl", hostEnvironment);
       if (systemdRun === null || systemctl === null) return undefined;
       yield* stopLeftoverAgents(systemctl);
+      // T3 sets no memory limits; the kernel handles memory. Every build for this user
+      // shares the slice name, so clear limits an earlier build left before the probes
+      // below start scopes in a slice it may throttle.
+      const cleared = yield* run(systemctl, [
+        "--user",
+        "set-property",
+        "--runtime",
+        AGENT_SLICE,
+        "MemoryHigh=infinity",
+        "MemoryMax=infinity",
+      ]);
       const probe = (options: ReadonlyArray<string>) =>
         run(systemdRun, [
           "--user",
@@ -169,8 +165,9 @@ export const make = Effect.gen(function* () {
           "--",
           "true",
         ]).pipe(Effect.map((result) => result._tag === "Some" && result.value.code === 0));
-      // Scopes take OOMPolicy from systemd 253; older managers still get scopes.
-      const supportsOomPolicy = yield* probe([...SCOPE_OPTIONS, "--property=OOMPolicy=stop"]);
+      // When the kernel kills one process for memory, the rest of its scope keeps running.
+      // Scopes take OOMPolicy from systemd 253; older managers still get plain scopes.
+      const supportsOomPolicy = yield* probe([...SCOPE_OPTIONS, OOM_POLICY_OPTION]);
       if (!supportsOomPolicy && !(yield* probe(SCOPE_OPTIONS))) {
         yield* Effect.logInfo("Agent scopes are off: no systemd user manager");
         return undefined;
@@ -194,15 +191,14 @@ export const make = Effect.gen(function* () {
           });
         }
       });
-      // No MemoryHigh: it only throttles, so one runaway process held the slice below
-      // MemoryMax for hours and stalled every agent in it, shared app-servers included.
-      // Builds share this slice, so infinity also clears a value an earlier one set.
-      const memoryMax = agentSliceMemoryMax(NodeOS.totalmem());
-      yield* setProperties(AGENT_SLICE, ["MemoryHigh=infinity", `MemoryMax=${memoryMax}`]);
+      if (cleared._tag === "None" || cleared.value.code !== 0) {
+        yield* Effect.logWarning("Could not clear memory limits on the agents slice", {
+          stderr: cleared._tag === "Some" ? cleared.value.stderr.trim() : undefined,
+        });
+      }
       yield* setProperties(AGENTS_PARENT_SLICE, AGENTS_PARENT_PROPERTIES);
       yield* Effect.logInfo("Agent scopes are on", {
         slice: AGENT_SLICE,
-        memoryMax,
         oomPolicy: supportsOomPolicy,
       });
       return {
@@ -328,10 +324,6 @@ export const make = Effect.gen(function* () {
       state.populated === false
     )
       return;
-    // The kernel counts OOM kills before signaling the victim. Let OOMPolicy
-    // record the result before a manual stop can overwrite it; an unreadable
-    // counter cannot rule out that race. Older managers need us to stop it.
-    if (scope.supportsOomPolicy && (state.oomKills === undefined || state.oomKills > 0)) return;
     const stopped = yield* run(scope.systemctl, ["--user", "stop", "--no-block", unit]);
     if (stopped._tag === "None" || stopped.value.code !== 0) {
       yield* Effect.logWarning("Could not stop an exited agent's scope", {
@@ -411,9 +403,7 @@ export const make = Effect.gen(function* () {
         // unload the unit even when it fails.
         options: [
           ...SCOPE_OPTIONS,
-          ...(scope.supportsOomPolicy
-            ? [`--property=OOMPolicy=${continuing ? "continue" : "stop"}`]
-            : []),
+          ...(scope.supportsOomPolicy ? [OOM_POLICY_OPTION] : []),
           ...(owned ? [] : ["--collect"]),
         ],
       };

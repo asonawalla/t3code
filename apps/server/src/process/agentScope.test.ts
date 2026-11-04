@@ -27,11 +27,11 @@ const running: ScopeState = {
 };
 
 describe("classifyScope", () => {
-  it("reports an OOM kill only once systemd records it", () => {
+  it("reports an OOM kill only once systemd records it, and a scope that lost one process runs on", () => {
     expect(classifyScope({ ...running, activeState: "failed", result: "oom-kill" })).toBe(
       "oom-killed",
     );
-    expect(classifyScope({ ...running, oomKills: 1 })).toBe("stopping");
+    expect(classifyScope({ ...running, oomKills: 1 })).toBe("running");
     expect(classifyScope({ ...running, populated: false })).toBe("stopping");
     expect(classifyScope({ ...running, activeState: "deactivating" })).toBe("stopping");
   });
@@ -198,7 +198,7 @@ describe("AgentScope service", () => {
       withFakeSystemd(({ scope, units, calls }) =>
         Effect.gen(function* () {
           const agent = yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
-          expect(agent.args).toContain("--property=OOMPolicy=stop");
+          expect(agent.args).toContain("--property=OOMPolicy=continue");
           units.set(unitOf(agent), { activeState: "failed", result: "oom-kill" });
           expect(yield* scope.oomKilled("a")).toBe(true);
 
@@ -280,7 +280,7 @@ describe("AgentScope service", () => {
     ),
   );
 
-  it.effect("caps agent memory and yields CPU, disk, and tasks to the server", () =>
+  it.effect("sets no memory limits and yields CPU, disk, and tasks to the server", () =>
     withFakeSystemd(({ scope, calls }) =>
       Effect.gen(function* () {
         yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
@@ -291,9 +291,9 @@ describe("AgentScope service", () => {
             "set-property",
             "--runtime",
             "app-t3code-agents.slice",
-            // A throttled slice stalls every agent in it; this also clears an older build's value.
+            // The kernel handles memory; this clears limits an older build set.
             "MemoryHigh=infinity",
-            expect.stringMatching(/^MemoryMax=\d+$/),
+            "MemoryMax=infinity",
           ],
           [
             "--user",
@@ -356,7 +356,7 @@ describe("AgentScope service", () => {
   );
 
   it.effect.each([true, false])(
-    "cleans up an OOM exit without losing its diagnosis (OOMPolicy=%s)",
+    "reaps what an agent left after the kernel killed one of its processes (OOMPolicy=%s)",
     (oomPolicy) =>
       withFakeSystemd(
         ({ scope, units, calls, cgroupRoot }) =>
@@ -370,21 +370,12 @@ describe("AgentScope service", () => {
             const unit = unitOf(agent);
             exitedAgent(units, cgroupRoot, unit, { populated: true, oomKills: undefined });
             yield* scope.stop(unit);
-            expect(stopsOf(calls)).toEqual(
-              oomPolicy ? [] : [["--user", "stop", "--no-block", unit]],
-            );
-
-            // The kernel records the kill before systemd records the OOM result.
             exitedAgent(units, cgroupRoot, unit, { populated: true, oomKills: 1 });
             yield* scope.stop(unit);
-            expect(stopsOf(calls)).toHaveLength(oomPolicy ? 0 : 2);
-
-            if (oomPolicy) {
-              units.set(unit, { activeState: "failed", result: "oom-kill" });
-              expect(yield* scope.oomKilled("a")).toBe(true);
-              units.delete(unit);
-              expect(yield* scope.oomKilled("a")).toBe(true);
-            }
+            expect(stopsOf(calls)).toEqual([
+              ["--user", "stop", "--no-block", unit],
+              ["--user", "stop", "--no-block", unit],
+            ]);
           }),
         { oomPolicy },
       ),
