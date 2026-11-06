@@ -60,6 +60,7 @@ import {
   makeAcpRegistryAdapterV2,
   acpRegistryPromptFailure,
   acpRegistryProbeResult,
+  extractOmpSubagentUpdates,
 } from "@t3tools/provider-acp-registry/testing";
 
 const decodeAcpRegistryAdapterSettings = Schema.decodeUnknownEffect(
@@ -2340,6 +2341,232 @@ describe("AcpRegistryAdapterV2", () => {
       assert.equal(yield* runTurn(1), "failed");
       assert.equal(yield* runTurn(2), "completed");
       assert.equal(spawned, restarts ? 2 : 1);
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it("projects oh-my-pi task fan-out into one subagent per task", () => {
+    const progress = (status: "running" | "completed", output: ReadonlyArray<string>) => ({
+      id: "ReadNotesFirstLine",
+      agent: "scout",
+      status,
+      recentOutput: output,
+      resolvedModel: "test-model:medium",
+    });
+    const base = {
+      toolCallId: "call_task_1",
+      data: {
+        name: "task",
+        rawInput: {
+          context: "# Goal",
+          tasks: [{ name: "ReadNotesFirstLine", agent: "scout", task: "Read notes.txt" }],
+        },
+      },
+    };
+    const running = extractOmpSubagentUpdates({
+      ...base,
+      status: "inProgress",
+      data: {
+        ...base.data,
+        rawOutput: { details: { async: null, progress: [progress("running", [])] } },
+      },
+    });
+    assert.lengthOf(running ?? [], 1);
+    assert.deepEqual(
+      {
+        nativeTaskId: running?.[0]?.nativeTaskId,
+        prompt: running?.[0]?.prompt,
+        title: running?.[0]?.title,
+        model: running?.[0]?.model,
+        status: running?.[0]?.status,
+      },
+      {
+        nativeTaskId: "call_task_1:ReadNotesFirstLine",
+        prompt: "Read notes.txt",
+        title: "scout",
+        model: "test-model:medium",
+        status: "running",
+      },
+    );
+    const completed = extractOmpSubagentUpdates({
+      ...base,
+      status: "completed",
+      data: {
+        ...base.data,
+        rawOutput: {
+          details: { async: null, progress: [progress("completed", ["line one", "done"])] },
+        },
+      },
+    });
+    assert.equal(completed?.[0]?.status, "completed");
+    assert.equal(completed?.[0]?.result, "line one\ndone");
+    assert.isUndefined(
+      extractOmpSubagentUpdates({
+        toolCallId: "call_read",
+        status: "completed",
+        data: { name: "read", rawInput: { path: "notes.txt" } },
+      }),
+    );
+  });
+
+  it.effect("projects oh-my-pi task subagents from live ACP frames", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const replayDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-omp-subagent-" });
+      const scriptPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-replay-agent.ts", import.meta.url),
+      );
+      const request = (method: string, params: unknown = "<any>") => ({
+        type: "expect_outbound",
+        frame: { kind: "request", method, params },
+      });
+      const respond = (method: string, response: object) => ({
+        type: "emit_inbound",
+        frame: { kind: "response", method, ...response },
+      });
+      const update = (updateBody: object) => ({
+        type: "emit_inbound",
+        frame: {
+          kind: "notification",
+          method: "session/update",
+          params: { sessionId: "omp-session", update: updateBody },
+        },
+      });
+      const taskInput = {
+        context: "# Goal\nReport the first line.",
+        tasks: [{ name: "ReadNotes", agent: "scout", task: "Read notes.txt" }],
+      };
+      const progressOf = (status: "running" | "completed", recentOutput: ReadonlyArray<string>) => [
+        update({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call_task_1",
+          status: status === "completed" ? "completed" : "in_progress",
+          rawOutput: {
+            content: [{ type: "text", text: "Background task ReadNotes complete." }],
+            details: {
+              async: null,
+              progress: [
+                {
+                  index: 0,
+                  id: "ReadNotes",
+                  agent: "scout",
+                  status,
+                  recentOutput,
+                  resolvedModel: "test-model:medium",
+                },
+              ],
+              results: [],
+              totalDurationMs: 6024,
+            },
+          },
+        }),
+      ];
+      const transcript = yield* decodeAcpReplayTranscript(
+        {
+          provider: ACP_REGISTRY_PROVIDER,
+          protocol: "acp.ndjson-jsonrpc",
+          version: "1",
+          scenario: "omp-subagent",
+          entries: [
+            request("initialize"),
+            respond("initialize", {
+              result: { protocolVersion: 1, agentCapabilities: { loadSession: true } },
+            }),
+            request("session/new"),
+            respond("session/new", { result: { sessionId: "omp-session" } }),
+            request("session/prompt"),
+            update({
+              sessionUpdate: "tool_call",
+              toolCallId: "call_task_1",
+              kind: "other",
+              status: "pending",
+              name: "task",
+              title: "Spawning scout to read notes file",
+              rawInput: taskInput,
+              _meta: null,
+            }),
+            ...progressOf("running", []),
+            ...progressOf("completed", ["line one: hello from notes"]),
+            respond("session/prompt", { result: { stopReason: "end_turn" } }),
+          ] as never,
+        },
+        ACP_REGISTRY_PROVIDER,
+      );
+      const instanceId = ProviderInstanceId.make("omp-subagent");
+      const adapter = yield* makeAcpRegistryAdapterV2({
+        selfInvocation: yield* resolveSelfInvocation(),
+        instanceId,
+        settings: yield* decodeAcpRegistryAdapterSettings({
+          source: "local",
+          commandPath: "omp",
+        }),
+        environment: {},
+        makeRuntime: makeAcpReplayRuntime({
+          transcript,
+          statusPath: path.join(replayDir, "status.json"),
+          scriptPath,
+          childProcessSpawner,
+          fileSystem,
+        }),
+      }).pipe(Effect.provide(layerInjectedRuntimeCatalog));
+      const threadId = ThreadId.make("thread-omp-subagent");
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: replayDir,
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("session-omp-subagent"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      const events = yield* runtime
+        .startTurn(makeTurnInput({ threadId, providerThread, instanceId, runtimePolicy, now }))
+        .pipe(
+          Effect.andThen(
+            runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            ),
+          ),
+        );
+      const subagents = Array.from(events).flatMap((event) =>
+        event.type === "subagent.updated" ? [event.subagent] : [],
+      );
+      assert.isAtLeast(subagents.length, 2, "running and completed rows for one task");
+      const spawned = subagents.find((task) => task.status === "running");
+      const finished = subagents.findLast((task) => task.status === "completed");
+      assert.isDefined(spawned);
+      assert.equal(spawned?.prompt, "Read notes.txt");
+      assert.equal(spawned?.title, "scout");
+      assert.equal(spawned?.origin, "provider_native");
+      assert.isDefined(finished);
+      assert.equal(finished?.id, spawned?.id, "one row per task id");
+      assert.equal(finished?.result, "line one: hello from notes");
+      const items = Array.from(events).flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? [event.turnItem]
+          : [],
+      );
+      assert.isTrue(items.some((item) => item.status === "completed"));
+      assert.isFalse(
+        Array.from(events).some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "dynamic_tool" &&
+            event.turnItem.toolName === "task",
+        ),
+        "the task tool is shown as subagents, not as a generic tool row",
+      );
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 });

@@ -466,6 +466,10 @@ export interface AcpAdapterV2Flavor {
   readonly extractSubagentUpdate?: (
     toolCall: AcpToolCallState,
   ) => AcpAdapterV2SubagentUpdate | undefined;
+  /** One tool call fans out to several subagents (oh-my-pi `task`); takes precedence over the singular hook. */
+  readonly extractSubagentUpdates?: (
+    toolCall: AcpToolCallState,
+  ) => ReadonlyArray<AcpAdapterV2SubagentUpdate> | undefined;
   readonly isProvisionalSubagentTool?: (toolCall: AcpToolCallState) => boolean;
   readonly normalizeToolCall?: (toolCall: AcpToolCallState) => AcpToolCallState;
   readonly extractProposedPlanMarkdown?: (toolCall: AcpToolCallState) => string | undefined;
@@ -1536,11 +1540,16 @@ function acpPostSettleMonitorPromptShouldSuppress(
 
 export function acpCompletedTurnShouldTerminalizeTool(
   tool: AcpToolCallState,
-  flavor: Pick<AcpAdapterV2Flavor, "extractBackgroundTaskId" | "extractSubagentUpdate">,
+  flavor: Pick<
+    AcpAdapterV2Flavor,
+    "extractBackgroundTaskId" | "extractSubagentUpdate" | "extractSubagentUpdates"
+  >,
 ): boolean {
   const status = toolStatus(tool.status);
   if (status !== "pending" && status !== "running") return false;
   if (flavor.extractBackgroundTaskId?.(tool) !== undefined) return false;
+  if (flavor.extractSubagentUpdates !== undefined)
+    return flavor.extractSubagentUpdates(tool) === undefined;
   return flavor.extractSubagentUpdate?.(tool) === undefined;
 }
 
@@ -1881,6 +1890,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           flavor.extractSubagentSessionEvent !== undefined && !followsAgentWorkState
             ? undefined
             : flavor.extractSubagentUpdate?.(tool);
+        const extractSubagentUpdates = (tool: AcpToolCallState) => {
+          if (flavor.extractSubagentUpdates !== undefined)
+            return flavor.extractSubagentUpdates(tool);
+          const single = extractSubagentUpdate(tool);
+          return single === undefined ? undefined : [single];
+        };
         let turnAttached = yield* Deferred.make<boolean>();
         const activeSessionId = yield* Ref.make<string | null>(null);
         const contextUsageBySessionId = yield* Ref.make(
@@ -3869,13 +3884,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           }
 
           // Monitor TaskOutput resembles subagent hydration; do not invent a subagent.
-          const subagentUpdate = hydratedRegisteredMonitor
+          const subagentUpdates = hydratedRegisteredMonitor
             ? undefined
-            : extractSubagentUpdate(toolCall);
-          if (subagentUpdate !== undefined) {
-            yield* emitSubagent(context, subagentUpdate);
+            : extractSubagentUpdates(toolCall);
+          if (subagentUpdates !== undefined) {
+            for (const subagentUpdate of subagentUpdates) {
+              yield* emitSubagent(context, subagentUpdate);
+            }
             if (followsAgentWorkState) yield* syncNativeChildren(context);
-            if (subagentUpdate.suppressNormalTool !== false) {
+            if (subagentUpdates.every((update) => update.suppressNormalTool !== false)) {
               yield* rearmDeferredFinalize(context);
               return;
             }
@@ -5014,37 +5031,38 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const projectCarryover = rootTerminalCanStillProject;
             let carryoverTerminalized = false;
             if (
-              flavor.extractSubagentUpdate !== undefined &&
+              (flavor.extractSubagentUpdate !== undefined ||
+                flavor.extractSubagentUpdates !== undefined) &&
               (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update")
             ) {
               for (const event of parseSessionUpdateEvent(notification).events) {
                 if (event._tag !== "ToolCallUpdated") continue;
                 const toolCall = flavor.normalizeToolCall?.(event.toolCall) ?? event.toolCall;
-                const subagentUpdate = extractSubagentUpdate(toolCall);
-                if (subagentUpdate === undefined) continue;
-                if (!acpSubagentStatusIsTerminal(subagentUpdate.status)) {
-                  continue;
-                }
-                if (
-                  yield* updateCarryoverSubagentStatus(
-                    subagentUpdate.nativeTaskId,
-                    subagentUpdate.status,
-                    subagentUpdate.result,
-                    { project: projectCarryover },
-                  )
-                ) {
-                  carryoverTerminalized = true;
-                }
-                if (
-                  subagentUpdate.childSessionId !== null &&
-                  (yield* updateCarryoverSubagentStatus(
-                    subagentUpdate.childSessionId,
-                    subagentUpdate.status,
-                    subagentUpdate.result,
-                    { project: projectCarryover },
-                  ))
-                ) {
-                  carryoverTerminalized = true;
+                for (const subagentUpdate of extractSubagentUpdates(toolCall) ?? []) {
+                  if (!acpSubagentStatusIsTerminal(subagentUpdate.status)) {
+                    continue;
+                  }
+                  if (
+                    yield* updateCarryoverSubagentStatus(
+                      subagentUpdate.nativeTaskId,
+                      subagentUpdate.status,
+                      subagentUpdate.result,
+                      { project: projectCarryover },
+                    )
+                  ) {
+                    carryoverTerminalized = true;
+                  }
+                  if (
+                    subagentUpdate.childSessionId !== null &&
+                    (yield* updateCarryoverSubagentStatus(
+                      subagentUpdate.childSessionId,
+                      subagentUpdate.status,
+                      subagentUpdate.result,
+                      { project: projectCarryover },
+                    ))
+                  ) {
+                    carryoverTerminalized = true;
+                  }
                 }
               }
             }
@@ -6029,7 +6047,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           context: ActiveAcpTurn,
           notification: EffectAcpSchema.SessionNotification,
         ) {
-          if (flavor.extractSubagentUpdate === undefined) return false;
+          if (
+            flavor.extractSubagentUpdate === undefined &&
+            flavor.extractSubagentUpdates === undefined
+          )
+            return false;
 
           const applyTerminal = Effect.fnUntraced(function* (
             subagent: ActiveAcpSubagent,
@@ -6056,32 +6078,32 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           ) {
             for (const event of parseSessionUpdateEvent(notification).events) {
               if (event._tag !== "ToolCallUpdated") continue;
-              const toolCall = flavor.normalizeToolCall?.(event.toolCall) ?? event.toolCall;
-              const subagentUpdate = extractSubagentUpdate(toolCall);
-              if (
-                subagentUpdate === undefined ||
-                !acpSubagentStatusIsTerminal(subagentUpdate.status)
-              ) {
-                continue;
+              const incoming = flavor.normalizeToolCall?.(event.toolCall) ?? event.toolCall;
+              // Terminal frames omit rawInput; the merged row still carries the task specs.
+              const toolCall = mergeToolCallState(context.tools.get(incoming.toolCallId), incoming);
+              for (const subagentUpdate of extractSubagentUpdates(toolCall) ?? []) {
+                if (!acpSubagentStatusIsTerminal(subagentUpdate.status)) {
+                  continue;
+                }
+                const subagent =
+                  context.subagents.get(subagentUpdate.nativeTaskId) ??
+                  (subagentUpdate.childSessionId === null
+                    ? undefined
+                    : context.subagentsBySessionId.get(subagentUpdate.childSessionId)) ??
+                  context.subagentsBySessionId.get(notification.sessionId);
+                if (subagent === undefined) continue;
+                const nativeTaskId =
+                  subagent.task.nativeTaskRef?.nativeId ?? String(subagent.task.id);
+                if (
+                  subagentUpdate.nativeTaskId !== nativeTaskId &&
+                  (subagentUpdate.childSessionId === null ||
+                    (subagentUpdate.childSessionId !== subagent.childSessionId &&
+                      subagentUpdate.childSessionId !== notification.sessionId))
+                ) {
+                  continue;
+                }
+                if (yield* applyTerminal(subagent, subagentUpdate)) return true;
               }
-              const subagent =
-                context.subagents.get(subagentUpdate.nativeTaskId) ??
-                (subagentUpdate.childSessionId === null
-                  ? undefined
-                  : context.subagentsBySessionId.get(subagentUpdate.childSessionId)) ??
-                context.subagentsBySessionId.get(notification.sessionId);
-              if (subagent === undefined) continue;
-              const nativeTaskId =
-                subagent.task.nativeTaskRef?.nativeId ?? String(subagent.task.id);
-              if (
-                subagentUpdate.nativeTaskId !== nativeTaskId &&
-                (subagentUpdate.childSessionId === null ||
-                  (subagentUpdate.childSessionId !== subagent.childSessionId &&
-                    subagentUpdate.childSessionId !== notification.sessionId))
-              ) {
-                continue;
-              }
-              if (yield* applyTerminal(subagent, subagentUpdate)) return true;
             }
           }
 

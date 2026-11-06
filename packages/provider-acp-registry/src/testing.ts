@@ -11,6 +11,7 @@ export {
   normalizeDevinToolCall,
 } from "./server/devinAcp.ts";
 export { extractCopilotSubagentUpdate, makeCopilotSubagentRouting } from "./server/copilotAcp.ts";
+export { extractOmpSubagentUpdates } from "./server/ompAcp.ts";
 export {
   acpRegistryProbeFailure,
   acpRegistryProbeResult,

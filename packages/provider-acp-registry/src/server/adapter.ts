@@ -9,6 +9,7 @@ import {
   extractDevinSubagentUpdate,
 } from "./devinAcp.ts";
 import { extractDroidElicitationForm } from "./droidAcp.ts";
+import { extractOmpSubagentUpdates } from "./ompAcp.ts";
 import {
   copilotClientCapabilitiesMeta,
   extractCopilotSubagentUpdate,
@@ -198,6 +199,10 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
       /^claude-agent-acp(\.exe|\.cmd)?$/i.test(
         options.settings.commandPath.split(/[\\/]/).pop() ?? "",
       ));
+  const isOmp =
+    registryAgentId === "pi-acp" ||
+    (options.settings.source === "local" &&
+      /^omp(\.exe|\.cmd)?$/i.test(options.settings.commandPath.split(/[\\/]/).pop() ?? ""));
   const runtimeOptions = isClaude
     ? {
         ...options,
@@ -234,6 +239,21 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           extractSubagentUpdate: extractClaudeSubagentUpdate,
           isProvisionalSubagentTool: isClaudeProvisionalSubagentTool,
           extractSubagentSessionEvent: extractClaudeSubagentSessionEvent,
+        }
+      : {}),
+    // omp keeps background task jobs alive past turn end; settled turns park them.
+    ...(isOmp
+      ? {
+          extractSubagentUpdates: extractOmpSubagentUpdates,
+          subagentsIdleOnTurnCompletion: true,
+          capabilities: {
+            ...AcpProviderCapabilitiesV2,
+            subagents: {
+              ...AcpProviderCapabilitiesV2.subagents,
+              supportsSubagents: true,
+              emitsSubagentLifecycle: true,
+            },
+          },
         }
       : {}),
     ...(isDevin
