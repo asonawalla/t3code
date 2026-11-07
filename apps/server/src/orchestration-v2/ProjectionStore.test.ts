@@ -1264,19 +1264,12 @@ const threadWorktreePathsIncludeArchivedOnRequest = Effect.gen(function* () {
     payload: { ...deleted, deletedAt: now },
   });
 
-  const active = {
-    threadId: ThreadId.make("thread:active"),
-    worktreePath: "/worktrees/active",
-    archived: false,
-  };
-  assert.deepEqual(yield* store.getThreadWorktreePaths(), [active]);
+  assert.deepEqual(yield* store.getThreadWorktreePaths(), [
+    { threadId: ThreadId.make("thread:active"), worktreePath: "/worktrees/active" },
+  ]);
   assert.deepEqual(yield* store.getThreadWorktreePaths({ includeArchived: true }), [
-    active,
-    {
-      threadId: ThreadId.make("thread:archived"),
-      worktreePath: "/worktrees/archived",
-      archived: true,
-    },
+    { threadId: ThreadId.make("thread:active"), worktreePath: "/worktrees/active" },
+    { threadId: ThreadId.make("thread:archived"), worktreePath: "/worktrees/archived" },
   ]);
 });
 
