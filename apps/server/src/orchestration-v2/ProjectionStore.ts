@@ -562,11 +562,7 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadWorktreePaths: (options?: {
     readonly includeArchived?: boolean;
   }) => Effect.Effect<
-    ReadonlyArray<{
-      readonly threadId: ThreadId;
-      readonly worktreePath: string;
-      readonly archived: boolean;
-    }>,
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
     ProjectionStoreV2Error
   >;
   /**
@@ -6680,15 +6676,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       );
 
     const getThreadWorktreePaths: ProjectionStoreV2Shape["getThreadWorktreePaths"] = (options) =>
-      sql<{
-        readonly thread_id: string;
-        readonly worktree_path: string;
-        readonly archived: number;
-      }>`
-        SELECT
-          thread_id,
-          json_extract(payload_json, '$.worktreePath') AS worktree_path,
-          json_extract(payload_json, '$.archivedAt') IS NOT NULL AS archived
+      sql<{ readonly thread_id: string; readonly worktree_path: string }>`
+        SELECT thread_id, json_extract(payload_json, '$.worktreePath') AS worktree_path
         FROM orchestration_v2_projection_threads
         WHERE deleted_at IS NULL
           ${options?.includeArchived === true ? sql`` : sql`AND json_extract(payload_json, '$.archivedAt') IS NULL`}
@@ -6698,7 +6687,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           rows.map((row) => ({
             threadId: ThreadId.make(row.thread_id),
             worktreePath: row.worktree_path,
-            archived: row.archived === 1,
           })),
         ),
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
