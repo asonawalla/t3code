@@ -485,7 +485,9 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
   canSteer = true,
   interruptTurn: Effect.Effect<void> = Effect.void,
   steeringAcceptsAttachments = true,
+  providerDriver = driver,
 ) {
+  const driver = providerDriver;
   const cwd = yield* checkpointWorkspace(name);
   const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
   const started: ProviderAdapter.ProviderAdapterV2TurnInput[] = [];
@@ -1509,8 +1511,15 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
   ),
 );
 
-const goalHarness = Effect.fn("goalHarness")(function* (name: string) {
-  const harness = yield* nextTurnSelectionHarness(name);
+const goalHarness = Effect.fn("goalHarness")(function* (name: string, providerDriver = driver) {
+  const harness = yield* nextTurnSelectionHarness(
+    name,
+    false,
+    true,
+    Effect.void,
+    true,
+    providerDriver,
+  );
   const send = (id: string, text: string, delivery: "queue" | "auto") =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1549,10 +1558,13 @@ const goalHarness = Effect.fn("goalHarness")(function* (name: string) {
   return { ...harness, send, read };
 });
 
-it.effect("stops the running turn and starts a goal sent into it next", () =>
+it.effect.each(["codex", "omp"])("stops %s work and starts a goal sent into it next", (provider) =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { steered, layer, startFirstTurn, send, read } = yield* goalHarness("goal-steer");
+      const { steered, layer, startFirstTurn, send, read } = yield* goalHarness(
+        `goal-steer-${provider}`,
+        ProviderDriverKind.make(provider),
+      );
       yield* Effect.gen(function* () {
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
         const threadId = yield* startFirstTurn;
@@ -1814,81 +1826,91 @@ it.effect("stops the running turn when a goal clear ends the goal driving it", (
   ),
 );
 
-it.effect("a side chat that opens with /goal gets its context on the next question", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const { events, layer, started, startFirstTurn } = yield* goalHarness("side-chat-goal");
-      yield* Effect.gen(function* () {
-        const orchestrator = yield* Orchestrator.OrchestratorV2;
-        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-        const parentId = yield* startFirstTurn;
-        const sideChatId = ThreadId.make("thread:side-chat-goal-child");
-        yield* orchestrator.dispatch({
-          type: "thread.fork",
-          commandId: CommandId.make("side-chat"),
-          sourceThreadId: parentId,
-          targetThreadId: sideChatId,
-          sourcePoint: { type: "latest_stable" },
-          sideChat: true,
-          createdBy: "user",
-          creationSource: "web",
-        });
-        const ask = (id: string, text: string) =>
-          orchestrator.dispatch({
-            type: "message.dispatch",
-            commandId: CommandId.make(id),
-            threadId: sideChatId,
-            messageId: MessageId.make(`message:${id}`),
-            text,
-            attachments: [],
-            modelSelection: runSelection,
-            dispatchMode: { type: "start_immediately" },
+it.effect.each([
+  { provider: "codex", command: "/goal clear" },
+  { provider: "omp", command: "/goal clear" },
+  { provider: "omp", command: "/model" },
+])(
+  "a $provider side chat opening with $command keeps context for its next question",
+  ({ provider, command }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const driver = ProviderDriverKind.make(provider);
+        const { events, layer, started, startFirstTurn } = yield* goalHarness(
+          `side-chat-command-${provider}`,
+          driver,
+        );
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const parentId = yield* startFirstTurn;
+          const sideChatId = ThreadId.make("thread:side-chat-goal-child");
+          yield* orchestrator.dispatch({
+            type: "thread.fork",
+            commandId: CommandId.make("side-chat"),
+            sourceThreadId: parentId,
+            targetThreadId: sideChatId,
+            sourcePoint: { type: "latest_stable" },
+            sideChat: true,
             createdBy: "user",
             creationSource: "web",
           });
-        const sideChatEvent = (matches: (event: OrchestrationV2DomainEvent) => boolean) =>
-          orchestrator.streamDomainEvents.pipe(
-            Stream.filter((event) => event.threadId === sideChatId && matches(event)),
-            Stream.take(1),
-            Stream.runDrain,
-            Effect.forkScoped({ startImmediately: true }),
+          const ask = (id: string, text: string) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(id),
+              threadId: sideChatId,
+              messageId: MessageId.make(`message:${id}`),
+              text,
+              attachments: [],
+              modelSelection: runSelection,
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+          const sideChatEvent = (matches: (event: OrchestrationV2DomainEvent) => boolean) =>
+            orchestrator.streamDomainEvents.pipe(
+              Stream.filter((event) => event.threadId === sideChatId && matches(event)),
+              Stream.take(1),
+              Stream.runDrain,
+              Effect.forkScoped({ startImmediately: true }),
+            );
+          const running = yield* sideChatEvent(
+            (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
           );
-        const running = yield* sideChatEvent(
-          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
-        );
-        const settled = yield* sideChatEvent(
-          (event) => event.type === "run.updated" && event.payload.status === "waiting",
-        );
-        yield* ask("goal", "/goal clear");
-        yield* worker.drain();
-        yield* Fiber.join(running);
-        const turn = (yield* orchestrator.getThreadProjection(sideChatId)).providerTurns[0]!;
-        yield* Queue.offer(events, {
-          type: "provider_turn.updated",
-          driver,
-          providerTurn: { ...turn, status: "completed", completedAt: yield* DateTime.now },
-        });
-        yield* Queue.offer(events, {
-          type: "turn.terminal",
-          driver,
-          providerThreadId: turn.providerThreadId,
-          providerTurnId: turn.id,
-          runOrdinal: started[1]!.runOrdinal,
-          status: "completed",
-          failure: null,
-          threadDisposition: "reusable",
-        });
-        yield* Fiber.join(settled);
-        yield* worker.drain();
-        yield* ask("question", "What is the main thread doing?");
-        yield* worker.drain();
+          const settled = yield* sideChatEvent(
+            (event) => event.type === "run.updated" && event.payload.status === "waiting",
+          );
+          yield* ask("goal", command);
+          yield* worker.drain();
+          yield* Fiber.join(running);
+          const turn = (yield* orchestrator.getThreadProjection(sideChatId)).providerTurns[0]!;
+          yield* Queue.offer(events, {
+            type: "provider_turn.updated",
+            driver,
+            providerTurn: { ...turn, status: "completed", completedAt: yield* DateTime.now },
+          });
+          yield* Queue.offer(events, {
+            type: "turn.terminal",
+            driver,
+            providerThreadId: turn.providerThreadId,
+            providerTurnId: turn.id,
+            runOrdinal: started[1]!.runOrdinal,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          });
+          yield* Fiber.join(settled);
+          yield* worker.drain();
+          yield* ask("question", "What is the main thread doing?");
+          yield* worker.drain();
 
-        const [first, goal, question] = started.map((turn) => turn.message.text);
-        assert.deepEqual([first, goal], ["first", "/goal clear"]);
-        assert.include(question, "You are in a side chat beside the main thread.");
-        assert.include(question, "- User: first");
-        assert.isTrue(question?.endsWith("What is the main thread doing?"));
-      }).pipe(Effect.provide(layer));
-    }),
-  ),
+          const [first, goal, question] = started.map((turn) => turn.message.text);
+          assert.deepEqual([first, goal], ["first", command]);
+          assert.include(question, "You are in a side chat beside the main thread.");
+          assert.include(question, "- User: first");
+          assert.isTrue(question?.endsWith("What is the main thread doing?"));
+        }).pipe(Effect.provide(layer));
+      }),
+    ),
 );

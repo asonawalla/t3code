@@ -376,14 +376,7 @@ export const layer: Layer.Layer<
                 (source.status === "failed" ||
                   source.status === "interrupted" ||
                   source.status === "cancelled" ||
-                  (source.status === "completed" &&
-                    handoff.delivery === undefined &&
-                    // Compaction and /goal turns defer history to the next turn.
-                    projection.messages.some(
-                      (message) =>
-                        message.id === source.userMessageId &&
-                        (isCompactionCommandMessage(message) || parseGoalCommand(message) !== null),
-                    ))),
+                  (source.status === "completed" && handoff.delivery === undefined)),
             )));
       const isSideChatHandoff = (handoff: OrchestrationV2ContextHandoff) =>
         projection.thread.lineage.sideChat === true &&
@@ -848,9 +841,15 @@ export const layer: Layer.Layer<
         text: message.text,
         records: message.context?.records ?? [],
       });
-      // Codex and Claude parse /goal from the prompt, so it goes verbatim and history waits a turn.
-      const goalDriver = session.driver === "codex" || session.driver === "claudeAgent";
+      // Native /goal controls go verbatim; conversation context waits for the next prompt.
+      const goalDriver =
+        session.driver === "codex" || session.driver === "claudeAgent" || session.driver === "omp";
       const goalCommand = goalDriver && parseGoalCommand(message) !== null;
+      const nativeCommand =
+        goalCommand ||
+        (session.driver === "omp" &&
+          message.attachments.length === 0 &&
+          /^\/[^\s/]+(?:\s|$)/u.test(userText.trim()));
       // The provider turn marks cancellation work delivered; restart continuations use their own text or resume natively.
       const noteContinuation = isRestartNoteContinuation(
         run,
@@ -1290,7 +1289,7 @@ export const layer: Layer.Layer<
             handoffs: [...handoffs, ...resumedRetryHandoff],
             providerThread: { ...resumed.success, id: providerThread.id },
             budget: context.budget,
-            deferInline: isCompactionCommandMessage(message) || goalCommand,
+            deferInline: isCompactionCommandMessage(message) || nativeCommand,
             alreadyDeliveredItemIds: context.deliveredItemIds,
             persist: () => Effect.void,
           }).pipe(
@@ -1585,7 +1584,7 @@ export const layer: Layer.Layer<
         function* (turnInput: Parameters<typeof session.startTurn>[0], compact = false) {
           const delivery = yield* deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...retryHandoff],
-            deferInline: compact || goalCommand,
+            deferInline: compact || nativeCommand,
             providerThread: runningProviderThread,
             budget,
             alreadyDeliveredItemIds: deliveredItemIds,
@@ -1604,7 +1603,7 @@ export const layer: Layer.Layer<
           const start = compact ? session.compactThread! : session.startTurn;
           // Like history, the side chat context waits for a turn that sends a prompt.
           const sideChatContext =
-            sideChatHandoff === undefined || compact || goalCommand
+            sideChatHandoff === undefined || compact || nativeCommand
               ? ""
               : sideChatHandoff.summaryText;
           const context = [delivery.context, sideChatContext, restartNote]
@@ -1615,7 +1614,7 @@ export const layer: Layer.Layer<
             ...(noteContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
-              text: goalCommand ? userText : withInlineContext(context, userText),
+              text: nativeCommand ? userText : withInlineContext(context, userText),
             },
           }).pipe(
             // Clear pending handoff markers for refused prompts so the next turn retains the native session.

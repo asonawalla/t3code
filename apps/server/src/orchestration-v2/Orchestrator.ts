@@ -1079,7 +1079,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const { driver } = yield* providerAdapters
       .get(providerInstanceId)
       .pipe(mapDispatchError(command));
-    return driver === "codex" || driver === "claudeAgent" ? driver : undefined;
+    return driver === "codex" || driver === "claudeAgent" || driver === "omp" ? driver : undefined;
   });
 
   /** Claude Code reads `/goal pause` and `/goal resume` as new goals named "pause" and "resume". */
@@ -5746,7 +5746,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       dispatchMode = { type: "queue_after_active" };
     }
-    // Codex and Claude own /goal; elsewhere it is ordinary text that cannot steer.
+    // Native goal commands run separately from the turn they control.
     const parsedGoalCommand = parseGoalCommand(command);
     const goalCommand =
       parsedGoalCommand === null ||

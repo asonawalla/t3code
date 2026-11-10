@@ -267,7 +267,7 @@ Claude instances can also compact idle threads for you. See
 
 ## Goals
 
-With Codex and Claude, send `/goal` followed by what "done" means, for example
+With Codex, Claude, and OMP, send `/goal` followed by what "done" means, for example
 `/goal all tests in packages/api pass`. The agent keeps working across turns
 until it judges the goal met. The thread shows **Goal** while it works, and a
 line at the end of the thread (above the composer on mobile) shows the goal and
@@ -276,6 +276,8 @@ its progress.
 - `/goal` alone shows the current goal. `/goal clear` removes it.
 - Codex also supports `/goal pause` and `/goal resume`. Stopping a Codex goal
   pauses it, and so does Codex ending its work without meeting the goal.
+- OMP supports `/goal pause` and `/goal resume` too. Stop pauses the goal; OMP's
+  budget and no-progress rules also limit automatic continuation.
 - Stopping Claude ends the current turn, but the goal stays set. Claude checks it
   again at the end of your next message.
 - Sending a new goal, or `/goal resume`, while the agent works stops the current
